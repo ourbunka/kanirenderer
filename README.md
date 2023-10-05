@@ -1,6 +1,8 @@
 # kanirenderer
 🦀 renderer, a basic renderer for preview your 3D meshes/file quickly with a command line.
 
+![PREVIEW](https://github.com/ourbunka/kanirenderer/blob/main/preview.gif)
+
 in /res directory, open terminal
   > kanirenderer sponza.obj opengl fullscreen
 

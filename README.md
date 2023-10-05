@@ -33,7 +33,7 @@ in /res directory, open terminal
   
   2)add kanirenderer.exe executable dir PATH to your OS ENVIRONMENT "PATH" VARIABLE
   
-  3)in your obj file directory, open terminal, then enter "kanirenderer yourfilename.obj opengl windowed"
+  3)in your obj file directory, open terminal, then enter "kanirenderer yourfilename.obj default windowed"
 
 
 # Credit

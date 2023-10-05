@@ -1,0 +1,37 @@
+[package]
+name = "kanirenderer_viewer"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+winit = "0.28"
+env_logger = "0.10"
+log = "0.4"
+wgpu = "0.17"
+pollster = "0.3"
+bytemuck = { version = "1.12", features = [ "derive" ] }
+anyhow = "1.0"
+cgmath = "0.18"
+tobj = { version = "4.0.0" , features = [ "async",]}
+cfg-if = "1"
+instant = "0.1"
+
+[[res]]
+name = "res"
+path = "src/res/"
+
+[build-dependencies]
+anyhow = "1.0"
+fs_extra = "1.2"
+glob = "0.3"
+
+[dependencies.image]
+version = "0.24"
+default-features = true
+features = ["png", "jpeg", "tga"]
+
+[[bin]]
+name = "kanirenderer"
+path = "src/main.rs"

@@ -1,5 +1,5 @@
 # kanirenderer
-🦀 renderer, a basic renderer for preview your 3D meshes/file quickly with a command line.
+🦀 renderer, a basic renderer for previewing your 3D meshes/file quickly with a command line.
 
 ![PREVIEW](https://github.com/ourbunka/kanirenderer/blob/main/preview.gif)
 
@@ -8,16 +8,16 @@ in /res directory, open terminal
 
 1st variable is your obj file name,
 
-2nd variable can be opengl or default(directx)
+2nd variable can be opengl or default(directx format)
 
 3rd variable is optional, can be fullscreen or windowed(default)
 
 # features
 -currently support .obj file with png/jpeg textures,
 
--basic lighting with albedo, specular and normal map support.
+-basic lighting with albedo, specular and normal map.
 
--support mesh with OPENGL(ie meshes authored in Blender) or DIRECTX format,
+mesh with OPENGL(meshes authored in Blender) or DIRECTX format,
 
 -fullscreen or windowed mode,
 
@@ -25,9 +25,11 @@ in /res directory, open terminal
 
 -using WGPU graphic api than compiled to native graphic api like DIRECTX12 / VULKAN / METAL
 
--windows 10/11 executables included, (Linux and MacOS should be supported,but you will need to compiled it yourself. install rust compiler , git clone this repo and in project dir "cargo build --release",
-
 -DirectX12 compatibles GPU required for Windows 10/11, Vulkan for Linux and Metal for macos.
+
+-windows 10/11 executables included, (Linux and MacOS should be supported,but you will have to compiled it yourself. install rust compiler , clone this repo and then "cargo build --release",
+
+
 
 # How to use?
 

@@ -8,8 +8,10 @@ fn main() {
     println!("Loading...");
     println!("");
     println!("");
-    println!("press \"wasd\" to move, hold right click to rotate camera,");
-    println!("\"space\" to travel up vertically, \"left shift\" to travel down vertically, scroll wheel to zoom  ");
+    println!("press \"WASD\" to move, hold right click to rotate camera,");
+    println!("\"space\" to travel up vertically,");
+    println!("\"left shift\" to travel down vertically, scroll wheel to zoom  ");
+    println!("IJKL to move light, U and O to move light up and down vertically");
     println!("");
     println!("");
     println!("⚠️⚠️⚠️esc to quit kanirenderer.⚠️⚠️⚠️");

@@ -3,6 +3,7 @@ mod texture;
 mod model;
 mod resources;
 mod camera;
+mod light;
 
 use model::{Vertex, DrawLight};
 use cgmath::{prelude::*, perspective};
@@ -155,11 +156,13 @@ struct State {
     instance_buffer: wgpu::Buffer,
     depth_texture: Texture,
     obj_model: model::Model,
-    light_uniform: LightUniform,
+    light_uniform: light::LightUniform,
     light_buffer: wgpu::Buffer,
     light_bind_group: wgpu::BindGroup,
     light_render_pipeline: wgpu::RenderPipeline,
-    light_mesh: model::Model,
+    //light_mesh: model::Model,
+    movable_light: light::Light,
+    movable_light_controller: light::MovableLightController,
     mouse_pressed: bool,
 }
 
@@ -356,12 +359,16 @@ impl State {
         });
 
 
-        let light_uniform = LightUniform {
+        let light_uniform = light::LightUniform {
             position: [2.0, 2.0, 2.0],
             _padding: 0,
-            color: [1.0, 1.0, 1.0],
+            color: [2.0, 2.0, 2.0],
             _padding2: 0,
         };
+
+        let movable_light = light::Light::new([2.0, 2.0, 2.0], cgmath::Deg(-90.0));
+
+        let movable_light_controller = light::MovableLightController::new(300.0, 1.0);
 
         let light_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Light VB"),
@@ -481,7 +488,7 @@ impl State {
         let loading_duration = start_loading_time.elapsed();
         println!("total loading time {:?}" , loading_duration);
         
-        let light_mesh = resources::load_model(&file_path, "opengl".to_string(), &device, &queue, &texture_bind_group_layout).await.unwrap();
+        //let light_mesh = resources::load_model("default_cube.obj", "opengl".to_string(), &device, &queue, &texture_bind_group_layout).await.unwrap();
             
 
 
@@ -507,8 +514,10 @@ impl State {
             light_buffer,
             light_bind_group,
             light_render_pipeline,
-            light_mesh,
+            //light_mesh,
             mouse_pressed: false,
+            movable_light,
+            movable_light_controller,
         }
     }
 
@@ -531,7 +540,7 @@ impl State {
         }
     }
 
-    fn input(&mut self, event: &WindowEvent) -> bool {
+    fn input(&mut self, event: &WindowEvent,) -> bool {
         match event {
             WindowEvent::KeyboardInput {
                 input: KeyboardInput {
@@ -540,7 +549,9 @@ impl State {
                     ..
                 },
                 ..
-            } => self.camera_controller.process_keyboard(*key, *state),
+            } => {  self.movable_light_controller.process_keyboard(*key, *state);
+                    self.camera_controller.process_keyboard(*key, *state)
+                }
             WindowEvent::MouseWheel { delta, .. } => {
                 self.camera_controller.process_scroll(delta);
                 true
@@ -555,12 +566,10 @@ impl State {
 
     fn update(&mut self, dt: instant::Duration) {
         self.camera_controller.update_camera(&mut self.camera, dt);
+        self.movable_light_controller.update_light(&mut self.movable_light, &mut self.light_uniform, dt);
         self.camera_uniform.update_view_proj(&self.camera, &self.projection);
         self.queue.write_buffer(&self.camera_buffer, 0,bytemuck::cast_slice(&[self.camera_uniform]));
         
-        let old_position: cgmath::Vector3<_> = self.light_uniform.position.into();
-        self.light_uniform.position = (
-            cgmath::Quaternion::from_axis_angle((0.0, 1.0, 0.0).into(), cgmath::Deg(60.0 * dt.as_secs_f32())) * old_position).into();
         self.queue.write_buffer(&self.light_buffer, 0, bytemuck::cast_slice(&[self.light_uniform]));
 
     }
@@ -604,11 +613,12 @@ impl State {
             
             use crate::model::DrawLight;
             render_pass.set_pipeline(&self.light_render_pipeline);
-            render_pass.draw_light_model(
-                &self.light_mesh,
-                &self.camera_bind_group,
-                &self.light_bind_group,
-            );
+            // render_pass.draw_light_model(
+            //     &self.light_mesh,
+            //     &self.camera_bind_group,
+            //     &self.light_bind_group,
+            // );
+            
             use crate::model::DrawModel;
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.draw_model_instanced(
@@ -655,7 +665,6 @@ pub async fn run(file_path: String, file_type:String, fullscreen_mode: String) {
     
     let mut state = State::new(window, file_path, file_type).await;
     let mut last_render_time = instant::Instant::now();
-    
 
     event_loop.run(move | event, _, control_flow | {*control_flow = ControlFlow::Poll; match event {
         Event::DeviceEvent { event: DeviceEvent::MouseMotion{delta,}, .. } => if state.mouse_pressed {
@@ -665,7 +674,7 @@ pub async fn run(file_path: String, file_type:String, fullscreen_mode: String) {
         Event::WindowEvent {
             ref event,
             window_id,
-        } if window_id == state.window().id() && !state.input(event) => {
+        } if window_id == state.window().id() && !state.input(event,) => {
                 match event {
                     #[cfg(not(target_arch="wasm32"))]
                     WindowEvent::CloseRequested | WindowEvent::KeyboardInput {

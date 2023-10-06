@@ -15,6 +15,8 @@ use winit::{
 };
 use winit::window::Window;
 
+use crate::resources::*;
+
 
 
 
@@ -469,11 +471,13 @@ impl State {
 
         use std::time::{Duration,Instant};
         let start_loading_time = Instant::now();
-        let obj_model = match file_type.clone().as_str() {
+        let mut obj_model = match file_type.clone().as_str() {
             "opengl" => resources::load_model(&file_path, file_type.clone(), &device, &queue, &texture_bind_group_layout).await.unwrap(),
             "default" => resources::load_model(&file_path, file_type.clone(), &device, &queue, &texture_bind_group_layout).await.unwrap(),
             _ => panic!("no file type given"),
         };
+
+        //obj_model = default_cube(&device, &queue, &texture_bind_group_layout).await.unwrap();
         let loading_duration = start_loading_time.elapsed();
         println!("total loading time {:?}" , loading_duration);
         

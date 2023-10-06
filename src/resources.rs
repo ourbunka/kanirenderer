@@ -47,12 +47,14 @@ pub async fn load_binary(file_name: &str) -> anyhow::Result<Vec<u8>> {
 
 
 pub async fn load_texture(file_name: &str, is_normal_map: bool, device: &wgpu::Device, queue: &wgpu::Queue,) -> anyhow::Result<texture::Texture> {
-    let data = load_binary(file_name).await?;
+    let default_texture: Vec<u8> = include_bytes!("../res/default_normal.png").to_vec();
+    let data = load_binary(file_name).await.unwrap_or(default_texture);
     texture::Texture::from_bytes(device, queue, &data, file_name, is_normal_map)
 }
 
 pub async fn load_opengl_texture(file_name: &str, is_normal_map: bool, device: &wgpu::Device, queue: &wgpu::Queue,) -> anyhow::Result<texture::Texture> {
-    let data = load_binary(file_name).await?;
+    let default_texture: Vec<u8> = include_bytes!("../res/default_normal.png").to_vec();
+    let data = load_binary(file_name).await.unwrap_or(default_texture);
     texture::Texture::from_opengl_bytes(device, queue, &data, file_name, is_normal_map)
 }
 
@@ -63,9 +65,14 @@ pub async fn load_model(
     queue: &wgpu::Queue, 
     layout: &wgpu::BindGroupLayout, 
 ) -> anyhow::Result<model::Model> {
-    let obj_text = load_string(file_name).await?;
+    let obj_text: String;
+    match file_name {
+        "default_cube.obj"   => obj_text = load_string(file_name).await.unwrap_or(include_str!("../res/cube.obj").to_string()),
+        _                   => obj_text = load_string(file_name).await?,
+    }
     let obj_cursor = Cursor::new(obj_text);
     let mut obj_reader = BufReader::new(obj_cursor);
+
 
     let (models, obj_materials) = tobj::load_obj_buf_async(
         &mut obj_reader,
@@ -75,13 +82,19 @@ pub async fn load_model(
             ..Default::default()
         },
         |p| async move {
-            let mat_text = load_string(&p).await.unwrap();
+            let mat_text: String;
+            match file_name {
+                "default_cube.obj"   => mat_text = load_string(&p).await.unwrap_or(include_str!("../res/cube.mtl").to_string()),
+                _                   => mat_text = load_string(&p).await.unwrap(),
+            }
+            // = load_string(&p).await.unwrap();
             tobj::load_mtl_buf(&mut BufReader::new(Cursor::new(mat_text)))
         },
     )
     .await?;
 
     let mut materials = Vec::new();
+
     for m in obj_materials? {
         let diffuse_texture: texture::Texture;
         let normal_texture: texture::Texture;
@@ -90,12 +103,14 @@ pub async fn load_model(
             "default" =>    {   if !m.diffuse_texture.is_none() {
                                     diffuse_texture = load_texture(&m.diffuse_texture.unwrap().as_str(), false, device, queue).await?;
                                 } else {
+                                    println!("no diffuse textures, using fallback texture");
                                     diffuse_texture = texture::Texture::from_bytes(device, queue, normal_bytes, "using a default normal map as fallback diffuse texture", false).unwrap();
                                 }
                 
                                 if !&m.normal_texture.is_none() {
                                     normal_texture = load_texture(&m.normal_texture.unwrap().as_str(), true, device, queue).await?;
                                 } else {
+                                    println!("no normal textures, using fallback texture");
                                     normal_texture = texture::Texture::from_bytes(device, queue, normal_bytes, "default_normal", true).unwrap();
                                     //load_texture("default_normal.png", device, queue).await?;
                                 }
@@ -103,11 +118,13 @@ pub async fn load_model(
             "opengl" =>     {   if !m.diffuse_texture.is_none() {
                                     diffuse_texture = load_opengl_texture(&m.diffuse_texture.unwrap().as_str(), false, device, queue, ).await?;
                                 } else {
+                                    println!("no diffuse textures, using fallback texture");
                                     diffuse_texture = texture::Texture::from_bytes(device, queue, normal_bytes, "using a default normal map as fallback diffuse texture", false).unwrap();
                                 }
                                 if !&m.normal_texture.is_none() {
                                     normal_texture = load_opengl_texture(&m.normal_texture.unwrap().as_str(), true, device, queue).await?;
                                 } else {
+                                    println!("no normal textures, using fallback texture");
                                     normal_texture = texture::Texture::from_bytes(device, queue, normal_bytes, "default_normal", true).unwrap();
                                     //load_texture("default_normal.png", device, queue).await?;
                                 }
@@ -128,10 +145,26 @@ pub async fn load_model(
         //     ],
         //     label: None,
         // });
+        
 
         materials.push(model::Material::new(
             device,
             &m.name,
+            diffuse_texture,
+            normal_texture,
+            layout,));
+    }
+
+    if materials.len() == 0 {
+        println!("{:?} do not have any materials", file_name);
+        println!("trying to add a default material");
+        let normal_bytes = include_bytes!("../res/default_normal.png");
+        let diffuse_texture = texture::Texture::from_bytes(device, queue, normal_bytes, "using a default normal map as fallback diffuse texture", false).unwrap();
+        let normal_texture = texture::Texture::from_bytes(device, queue, normal_bytes, "default_normal", true).unwrap();
+
+        materials.push(model::Material::new(
+            device,
+            "default material",
             diffuse_texture,
             normal_texture,
             layout,));
@@ -229,3 +262,11 @@ pub async fn load_model(
     Ok(model::Model {meshes, materials})
 }
 
+pub async fn load_default_cube(
+device: &wgpu::Device, 
+queue: &wgpu::Queue, 
+layout: &wgpu::BindGroupLayout, 
+) -> anyhow::Result<model::Model> {
+    let default_cube = load_model("default_cube.obj", "opengl".to_string(), device, queue, layout).await?;
+    Ok(default_cube)
+}

@@ -100,7 +100,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let attenuation = 2.0 / (1.0 + 0.0014 * light_distance + 0.000007 * (light_distance * light_distance)); 
 
     let ambient_strength = 0.05;
-    let ambient_color = light.color * ambient_strength;
+    let ambient_color = light.color * ambient_strength * attenuation;
 
     let tangent_normal = object_normal.xyz * 2.0 - 1.0;
     let light_dir = normalize(in.tangent_light_position - in.tangent_position);
@@ -108,13 +108,26 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let half_dir = normalize(view_dir + light_dir);
     
+    var cos_angle_Incidence = dot(tangent_normal, light_dir);
+    cos_angle_Incidence = clamp(cos_angle_Incidence, 0.0, 1.0);
     let diffuse_strength = max(dot(tangent_normal, light_dir), 0.0);
-    let diffuse_color = light.color * diffuse_strength * attenuation;
+    let diffuse_color = light.color * diffuse_strength * attenuation * cos_angle_Incidence;
 
     
+    var blinn_term = dot(tangent_normal, half_dir);
+    blinn_term = clamp(blinn_term, 0.0, 1.0);
+    if cos_angle_Incidence != 0.0 {
+        blinn_term = 0.0;
+    }
+    blinn_term = pow(blinn_term, 32.0);
+
 
     let specular_strength = pow(max(dot(tangent_normal, half_dir), 0.0), 32.0);
-    let specular_color = specular_strength * light.color * attenuation;
+    var specular_color = specular_strength * light.color * attenuation * blinn_term;
+    
+    if (diffuse_strength <= 0.05) {
+        specular_color = vec3(0.0);
+    }
 
     let result = (ambient_color + diffuse_color + specular_color) * object_color.xyz;
 

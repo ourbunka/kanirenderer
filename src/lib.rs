@@ -5,7 +5,7 @@ mod resources;
 mod camera;
 mod light;
 
-use model::{Vertex, DrawLight};
+use model::{Vertex,};
 use cgmath::{prelude::*, perspective};
 use texture::Texture;
 use wgpu::util::DeviceExt;
@@ -164,6 +164,7 @@ struct State {
     movable_light: light::Light,
     movable_light_controller: light::MovableLightController,
     mouse_pressed: bool,
+    test_mesh: model::Model,
 }
 
 fn create_render_pipeline(
@@ -489,6 +490,8 @@ impl State {
         println!("total loading time {:?}" , loading_duration);
         
         //let light_mesh = resources::load_model("default_cube.obj", "opengl".to_string(), &device, &queue, &texture_bind_group_layout).await.unwrap();
+
+        let test_mesh = resources::load_model("default_cube.obj", "opengl".to_string(), &device, &queue, &texture_bind_group_layout).await.unwrap();
             
 
 
@@ -518,6 +521,7 @@ impl State {
             mouse_pressed: false,
             movable_light,
             movable_light_controller,
+            test_mesh,
         }
     }
 
@@ -567,6 +571,9 @@ impl State {
     fn update(&mut self, dt: instant::Duration) {
         self.camera_controller.update_camera(&mut self.camera, dt);
         self.movable_light_controller.update_light(&mut self.movable_light, &mut self.light_uniform, dt);
+        // for mesh in self.test_mesh.meshes {
+        //     mesh.
+        // }
         self.camera_uniform.update_view_proj(&self.camera, &self.projection);
         self.queue.write_buffer(&self.camera_buffer, 0,bytemuck::cast_slice(&[self.camera_uniform]));
         
@@ -611,14 +618,8 @@ impl State {
 
             render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
             
-            use crate::model::DrawLight;
             render_pass.set_pipeline(&self.light_render_pipeline);
-            // render_pass.draw_light_model(
-            //     &self.light_mesh,
-            //     &self.camera_bind_group,
-            //     &self.light_bind_group,
-            // );
-            
+
             use crate::model::DrawModel;
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.draw_model_instanced(

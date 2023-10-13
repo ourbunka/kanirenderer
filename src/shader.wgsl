@@ -31,6 +31,7 @@ struct VertexOutput {
     @location(1) tangent_position: vec3<f32>,
     @location(2) tangent_light_position: vec3<f32>,
     @location(3) tangent_view_position: vec3<f32>,
+    @location(4) position: vec3<f32>,
 };
 
 struct Light {
@@ -72,6 +73,7 @@ fn vs_main(
     out.tangent_position = tangent_matrix * world_position.xyz;
     var tangent_view_position = tangent_matrix * camera.view_pos.xyz;
     out.tangent_light_position = tangent_matrix * light.position;
+    out.position = model.position;
     
     return out;
 }
@@ -94,7 +96,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let object_color: vec4<f32> = textureSample(t_diffuse, s_diffuse, in.tex_coords);
     let object_normal: vec4<f32> = textureSample(t_normal, s_normal, in.tex_coords);
 
-    let ambient_strength = 0.1;
+    let light_distance = length(light.position - in.position);
+    let attenuation = 2.0 / (1.0 + 0.0014 * light_distance + 0.000007 * (light_distance * light_distance)); 
+
+    let ambient_strength = 0.05;
     let ambient_color = light.color * ambient_strength;
 
     let tangent_normal = object_normal.xyz * 2.0 - 1.0;
@@ -104,12 +109,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let half_dir = normalize(view_dir + light_dir);
     
     let diffuse_strength = max(dot(tangent_normal, light_dir), 0.0);
-    let diffuse_color = light.color * diffuse_strength;
+    let diffuse_color = light.color * diffuse_strength * attenuation;
 
     
 
     let specular_strength = pow(max(dot(tangent_normal, half_dir), 0.0), 32.0);
-    let specular_color = specular_strength * light.color;
+    let specular_color = specular_strength * light.color * attenuation;
 
     let result = (ambient_color + diffuse_color + specular_color) * object_color.xyz;
 

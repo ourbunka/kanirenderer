@@ -15,19 +15,19 @@ in /res directory, open terminal
 # features
 -currently support .obj file with png/jpeg textures,
 
--basic lighting with albedo, specular and normal map.
+-basic lighting (diffuse, specular and ambient light)
 
-mesh with OPENGL(meshes authored in Blender) or DIRECTX format,
+-normal map.
+
+-mesh with OPENGL(meshes authored in Blender) or DIRECTX format,
 
 -fullscreen or windowed mode,
 
 -basic FPS movement(wasd + mouse),
 
--using WGPU graphic api than compiled to native graphic api like DIRECTX12 / VULKAN / METAL
+-basic movable point light and light controller
 
--DirectX12 compatibles GPU required for Windows 10/11, Vulkan for Linux and Metal for macos.
-
--windows 10/11 executables included, (Linux and MacOS should be supported,but you will have to compiled it yourself. install rust compiler , clone this repo and then "cargo build --release",
+-cross platform, windows 10/11 executables included, (Linux and MacOS should be supported, but you will have to compiled it yourself. install rust compiler , clone this repo and then "cargo build --release")
 
 
 

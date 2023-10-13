@@ -125,7 +125,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let specular_strength = pow(max(dot(tangent_normal, half_dir), 0.0), 32.0);
     var specular_color = specular_strength * light.color * attenuation * blinn_term;
     
-    if (diffuse_strength <= 0.05) {
+    if (diffuse_strength == 0.0) {
         specular_color = vec3(0.0);
     }
 

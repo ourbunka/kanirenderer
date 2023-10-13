@@ -2,22 +2,17 @@
 🦀 renderer, a basic renderer for previewing your 3D meshes/file quickly with a command line.
 
 ![PREVIEW](https://github.com/ourbunka/kanirenderer/blob/main/preview.gif)
+![PREVIEW2](https://github.com/ourbunka/kanirenderer/blob/main/preview2.gif)
 
 in /res directory, open terminal
   > kanirenderer sponza.obj opengl fullscreen
 
-1st variable is your obj file name,
-
-2nd variable can be opengl or default(directx format)
-
-3rd variable is optional, can be fullscreen or windowed(default)
-
 # features
 -currently support .obj file with png/jpeg textures,
 
--basic lighting (diffuse, specular and ambient light)
+-basic lighting (diffuse, specular and ambient light),
 
--normal map.
+-normal map,
 
 -mesh with OPENGL(meshes authored in Blender) or DIRECTX format,
 
@@ -35,7 +30,7 @@ in /res directory, open terminal
 
   1)compile yourself or download the executable
   
-  2)add kanirenderer.exe executable dir PATH to your OS ENVIRONMENT "PATH" VARIABLE
+  2)add kanirenderer.exe dir to your OS ENVIRONMENT "PATH" VARIABLE
   
   3)in your obj file directory, open terminal, then enter "kanirenderer yourfilename.obj default windowed"
 

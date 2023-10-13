@@ -116,7 +116,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     
     var blinn_term = dot(tangent_normal, half_dir);
     blinn_term = clamp(blinn_term, 0.0, 1.0);
-    if cos_angle_Incidence != 0.0 {
+    if cos_angle_Incidence <= 0.25 {
         blinn_term = 0.0;
     }
     blinn_term = pow(blinn_term, 32.0);
@@ -125,7 +125,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let specular_strength = pow(max(dot(tangent_normal, half_dir), 0.0), 32.0);
     var specular_color = specular_strength * light.color * attenuation * blinn_term;
     
-    if (diffuse_strength == 0.0) {
+    if (diffuse_strength <= 0.25) {
         specular_color = vec3(0.0);
     }
 

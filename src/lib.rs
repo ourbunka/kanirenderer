@@ -361,13 +361,13 @@ impl State {
 
 
         let light_uniform = light::LightUniform {
-            position: [2.0, 2.0, 2.0],
+            position: [0.0, 300.0, 0.0],
             _padding: 0,
             color: [2.0, 2.0, 2.0],
             _padding2: 0,
         };
 
-        let movable_light = light::Light::new([2.0, 2.0, 2.0], cgmath::Deg(-90.0));
+        let movable_light = light::Light::new([0.0, 300.0, 0.0], cgmath::Deg(-90.0));
 
         let movable_light_controller = light::MovableLightController::new(300.0, 1.0);
 

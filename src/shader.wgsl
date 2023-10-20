@@ -37,6 +37,7 @@ struct VertexOutput {
 struct Light {
     position: vec3<f32>,
     color: vec3<f32>,
+    range: f32,
 }
 @group(2) @binding(0)
 var<uniform> light: Light;
@@ -97,7 +98,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let object_normal: vec4<f32> = textureSample(t_normal, s_normal, in.tex_coords);
 
     let light_distance = length(light.position - in.position);
-    let attenuation = 2.0 / (1.0 + 0.0014 * light_distance + 0.000007 * (light_distance * light_distance)); 
+    let attenuation = 2.0 / (1.0 + (light.range * 0.0014) * light_distance + (light.range * 0.000007) * (light_distance * light_distance)); 
 
     let ambient_strength = 0.05;
     let ambient_color = light.color * ambient_strength * attenuation;
@@ -108,22 +109,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let half_dir = normalize(view_dir + light_dir);
     
-    var cos_angle_Incidence = dot(tangent_normal, light_dir);
-    cos_angle_Incidence = clamp(cos_angle_Incidence, 0.0, 1.0);
     let diffuse_strength = max(dot(tangent_normal, light_dir), 0.0);
-    let diffuse_color = light.color * diffuse_strength * attenuation * cos_angle_Incidence;
-
-    
-    var blinn_term = dot(tangent_normal, half_dir);
-    blinn_term = clamp(blinn_term, 0.0, 1.0);
-
-    blinn_term = pow(blinn_term, 32.0);
-
+    let diffuse_color = light.color * diffuse_strength * attenuation;
 
     let specular_strength = pow(max(dot(tangent_normal, half_dir), 0.0), 32.0);
-    var specular_color = specular_strength * light.color * attenuation * blinn_term;
+    var specular_color = specular_strength * light.color * attenuation;
     
-    if (cos_angle_Incidence <= 0.35) {
+    if (diffuse_strength <= 0.35) {
         specular_color = vec3(0.0);
     }
 

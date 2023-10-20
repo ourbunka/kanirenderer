@@ -364,7 +364,7 @@ impl State {
             position: [0.0, 300.0, 0.0],
             _padding: 0,
             color: [2.0, 2.0, 2.0],
-            _padding2: 0,
+            range: 1.0,
         };
 
         let movable_light = light::Light::new([0.0, 300.0, 0.0], cgmath::Deg(-90.0));

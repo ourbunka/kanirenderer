@@ -1,4 +1,5 @@
 use cgmath::*;
+use cgmath::num_traits::ToPrimitive;
 use winit::event::*;
 use winit::dpi::PhysicalPosition;
 use instant::Duration;
@@ -20,6 +21,7 @@ const SAFE_FRAC_PI_2: f32 = FRAC_PI_2 - 0.0001;
 pub struct Light {
     pub position: Point3<f32>,
     yaw: Rad<f32>,
+    pub range: f32,
 }
 
 #[repr(C)]
@@ -28,7 +30,7 @@ pub struct LightUniform {
     pub position: [f32; 3],
     pub _padding: u32,
     pub color: [f32; 3],
-    pub _padding2: u32,
+    pub range: f32,
 }
 
 impl Light {
@@ -36,6 +38,7 @@ impl Light {
         Self {
             position: position.into(),
             yaw: yaw.into(),
+            range: 1.0,
         }
     }
 }
@@ -49,6 +52,7 @@ pub struct MovableLightController {
     amount_down: f32,
     speed: f32,
     sensitivity: f32,
+    range: f32,
 }
 
 impl MovableLightController {
@@ -62,6 +66,7 @@ impl MovableLightController {
             amount_down: 0.0,
             speed,
             sensitivity,
+            range: 1.0,
         }
     }
 
@@ -93,6 +98,22 @@ impl MovableLightController {
                 self.amount_down = amount;
                 true
             }
+            VirtualKeyCode::Equals => {
+                if state == ElementState::Pressed  && self.range > 0.1 {
+                    println!("Increasing Point Light Ranges");
+                    self.range = self.range - 0.2;
+                    //println!("{:?}", self.range);
+                }
+                true
+            }
+            VirtualKeyCode::Minus => {
+                if state == ElementState::Pressed && self.range < 500.0 {
+                    println!("Decreasing Point Light Ranges");
+                    self.range = self.range + 0.2;
+                    //println!("{:?}", self.range);
+                }
+                true
+            }
             _ => false,
         }
     }
@@ -113,5 +134,7 @@ impl MovableLightController {
         light.position.y += (self.amount_up - self.amount_down) * self.speed * dt;
 
         light_uniform.position = light.position.into();
+        light.range = self.range.into();
+        light_uniform.range = self.range.into();
     }
 }

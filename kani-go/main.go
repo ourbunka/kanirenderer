@@ -9,6 +9,7 @@ import "C"
 import (
 	"flag"
 	"log"
+	"runtime"
 )
 
 // using kanirenderer in go
@@ -24,8 +25,13 @@ func main() {
 	filePath := C.CString(path)
 	fileType := C.CString(filet)
 	fullScreen := C.CString(mode)
-	go C.run_kanirenderer(filePath, fileType, fullScreen)
-	//keep main thread running
+	//fix panicked at 'Initializing the event loop outside of the main thread by
+	//locking kanirenderer to main thread, which required by winit
+	go func() {
+		runtime.LockOSThread()
+		C.run_kanirenderer(filePath, fileType, fullScreen)
+	}()
+	//keep main() running
 	select {}
 }
 

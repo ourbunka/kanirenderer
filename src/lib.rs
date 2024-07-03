@@ -1,4 +1,4 @@
-use std::vec;
+use std::{ffi::*, vec};
 mod texture;
 mod model;
 mod resources;
@@ -636,6 +636,20 @@ impl State {
         Ok(())
     }
 
+}
+
+#[no_mangle]
+pub unsafe  extern "C" fn run_kanirenderer(file_path_cstring: *const c_char, file_type_c: *const c_char, fs_mode_c: *const c_char ){
+    let file_path_cstr = CStr::from_ptr(file_path_cstring).to_str().expect("no path provided");
+    let file_path: String =  file_path_cstr.into();
+    if file_path.is_empty(){
+        panic!("no file path provided")
+    }
+    let ft_cstr = CStr::from_ptr(file_type_c).to_str().unwrap_or("default");
+    let file_type:String = ft_cstr.into(); //.unwrap_or("default").try_into().unwrap_or("default".to_string());
+    let fs_cstr = CStr::from_ptr(fs_mode_c).to_str().unwrap_or("fullscreen");
+    let fullscreen_mode:String = fs_cstr.into(); //unwrap_or("fullscreen").try_into().unwrap_or("fullscreen".to_string());
+    pollster::block_on(run(file_path, file_type, fullscreen_mode));
 }
 
 pub async fn run(file_path: String, file_type:String, fullscreen_mode: String) {

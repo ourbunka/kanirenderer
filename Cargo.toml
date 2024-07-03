@@ -35,3 +35,7 @@ features = ["png", "jpeg", "tga"]
 [[bin]]
 name = "kanirenderer"
 path = "src/main.rs"
+
+
+[lib]
+crate-type = ["rlib","dylib"]

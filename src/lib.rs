@@ -1,12 +1,16 @@
-use std::{ffi::*, vec};
+use std::vec;
 mod texture;
 mod model;
 mod resources;
 mod camera;
 mod light;
+mod deferredRenderPipeline;
 
-use model::{Vertex,};
-use cgmath::{prelude::*, perspective};
+use bytemuck::Contiguous;
+use light::{init_new_point_lights_buffer, PointLightData};
+use model::{update_instance, Model, Vertex};
+use cgmath::{num_traits::ToPrimitive, perspective, prelude::*};
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use texture::Texture;
 use wgpu::util::DeviceExt;
 use winit::{
@@ -46,88 +50,6 @@ impl CameraUniform {
     
 }
 
-struct Instance {
-    position: cgmath::Vector3<f32>,
-    rotation: cgmath::Quaternion<f32>,
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-#[allow(dead_code)]
-struct InstanceRaw {
-    model: [[f32;4]; 4],
-    normal: [[f32;3]; 3],
-}
-
-
-
-impl Instance {
-    fn to_raw(&self) -> InstanceRaw {
-        let model = cgmath::Matrix4::from_translation(self.position) * cgmath::Matrix4::from(self.rotation);
-        InstanceRaw { 
-            model: model.into(),
-            normal: cgmath::Matrix3::from(self.rotation).into(),
-        }
-    }
-}
-
-
-impl model::Vertex for InstanceRaw {
-    fn desc() -> wgpu::VertexBufferLayout<'static> {
-        use std::mem;
-        wgpu::VertexBufferLayout {
-            array_stride: mem::size_of::<InstanceRaw>() as wgpu::BufferAddress,
-            // We need to switch from using a step mode of Vertex to Instance
-            // This means that our shaders will only change to use the next
-            // instance when the shader starts processing a new instance
-            step_mode: wgpu::VertexStepMode::Instance,
-            attributes: &[
-                wgpu::VertexAttribute {
-                    offset: 0,
-                    // While our vertex shader only uses locations 0, and 1 now, in later tutorials we'll
-                    // be using 2, 3, and 4, for Vertex. We'll start at slot 5 not conflict with them later
-                    shader_location: 5,
-                    format: wgpu::VertexFormat::Float32x4,
-                },
-                // A mat4 takes up 4 vertex slots as it is technically 4 vec4s. We need to define a slot
-                // for each vec4. We don't have to do this in code though.
-                wgpu::VertexAttribute {
-                    offset: mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
-                    shader_location: 6,
-                    format: wgpu::VertexFormat::Float32x4,
-                },
-                wgpu::VertexAttribute {
-                    offset: mem::size_of::<[f32; 8]>() as wgpu::BufferAddress,
-                    shader_location: 7,
-                    format: wgpu::VertexFormat::Float32x4,
-                },
-                wgpu::VertexAttribute {
-                    offset: mem::size_of::<[f32; 12]>() as wgpu::BufferAddress,
-                    shader_location: 8,
-                    format: wgpu::VertexFormat::Float32x4,
-                },
-                // NEW!
-                wgpu::VertexAttribute {
-                    offset: mem::size_of::<[f32; 16]>() as wgpu::BufferAddress,
-                    shader_location: 9,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
-                wgpu::VertexAttribute {
-                    offset: mem::size_of::<[f32; 19]>() as wgpu::BufferAddress,
-                    shader_location: 10,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
-                wgpu::VertexAttribute {
-                    offset: mem::size_of::<[f32; 22]>() as wgpu::BufferAddress,
-                    shader_location: 11,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
-            ],
-        }
-    }
-}
-
-
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -139,6 +61,7 @@ struct LightUniform {
 }
 
 struct State {
+    free_cam : bool,
     surface: wgpu::Surface,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -152,19 +75,18 @@ struct State {
     camera_uniform: CameraUniform,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
-    instances: Vec<Instance>,
-    instance_buffer: wgpu::Buffer,
+    // instances: Vec<Instance>,
+    // instance_buffer: wgpu::Buffer,
     depth_texture: Texture,
-    obj_model: model::Model,
+    models : Vec<model::Model>,
     light_uniform: light::LightUniform,
     light_buffer: wgpu::Buffer,
     light_bind_group: wgpu::BindGroup,
-    light_render_pipeline: wgpu::RenderPipeline,
-    //light_mesh: model::Model,
+    point_light: Vec<light::Light>,
+    point_light_buffer: wgpu::Buffer,
     movable_light: light::Light,
     movable_light_controller: light::MovableLightController,
     mouse_pressed: bool,
-    test_mesh: model::Model,
 }
 
 fn create_render_pipeline(
@@ -224,6 +146,7 @@ fn create_render_pipeline(
 
 impl State {
     async fn new(window: Window, file_path: String, file_type:String) -> Self {
+        let free_cam = true;
         let size = window.inner_size();
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -266,15 +189,11 @@ impl State {
             format: surface_format,
             width: size.width,
             height: size.height,
-            present_mode: surface_caps.present_modes[0],
+            present_mode: wgpu::PresentMode::AutoVsync,//surface_caps.present_modes[2],
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
         };
         surface.configure(&device, &config);
-
-        // let diffuse_bytes = include_bytes!("happy-tree.png");
-
-        // let diffuse_texture = texture::Texture::from_bytes(&device, &queue, diffuse_bytes, "happy-tree.png").unwrap();
 
         let texture_bind_group_layout = device.create_bind_group_layout(
             &wgpu::BindGroupLayoutDescriptor {
@@ -363,11 +282,12 @@ impl State {
         let light_uniform = light::LightUniform {
             position: [0.0, 300.0, 0.0],
             _padding: 0,
-            color: [2.0, 2.0, 2.0],
+            color: [1.0, 1.0, 1.0],
             range: 1.0,
         };
+        //let light_mesh = load_model("default_cube.obj", "opengl".to_string(), &device, &queue, &texture_bind_group_layout).await.unwrap();
 
-        let movable_light = light::Light::new([0.0, 300.0, 0.0], cgmath::Deg(-90.0));
+        let movable_light = light::Light::new([0.0, 300.0, 0.0], cgmath::Deg(-90.0),[1.0,1.0,1.0]);
 
         let movable_light_controller = light::MovableLightController::new(300.0, 1.0);
 
@@ -376,9 +296,23 @@ impl State {
             contents: bytemuck::cast_slice(&[light_uniform]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
+        let mut point_light: Vec<light::Light> = Vec::new();
+        let mut point_light_data: Vec<light::PointLightData> = Vec::new();
+
+        //for spawning multiple point light
+        let light_num = 1;
+        for i in 0..light_num {
+            let color_r = i as f32 / 10.0;
+            let new_light = light::Light::new([0.0, i.to_f32().unwrap()*100.0, 0.0], cgmath::Deg(-90.0), [0.50,0.50,0.50]);
+            point_light.push(new_light);
+            let new_light_data = point_light[i].generate_point_light_data();
+            point_light_data.push(new_light_data);
+        }
+        let point_light_buffer = init_new_point_lights_buffer(point_light_data, &device);
 
         let light_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            entries: &[wgpu::BindGroupLayoutEntry {
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
@@ -387,56 +321,79 @@ impl State {
                     min_binding_size: None,
                 },
                 count: None,
-            }],
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: (true) },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }
+            ],
             label: None,
         });
 
         let light_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &light_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
+            entries: &[
+                wgpu::BindGroupEntry {
                 binding: 0,
                 resource: light_buffer.as_entire_binding(),
-            }],
+            },
+                wgpu::BindGroupEntry{
+                binding:1,
+                resource: point_light_buffer.as_entire_binding(),
+            }
+            ],
             label: None,
         });
 
-        const NUM_INSTANCES_PER_ROW: u32 = 1;
+        // const NUM_INSTANCES_PER_ROW: u32 = 1;
 
-        const SPACE_BETWEEN: f32 = 3.0;
+        // const SPACE_BETWEEN: f32 = 3.0;
 
-        let instances = (0..NUM_INSTANCES_PER_ROW)
-            .flat_map(|z| {
-                (0..NUM_INSTANCES_PER_ROW).map(move |x| {
-                    let x = SPACE_BETWEEN * (x as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
-                    let z = SPACE_BETWEEN * (z as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
+        // let instances = (0..NUM_INSTANCES_PER_ROW)
+        //     .flat_map(|z| {
+        //         (0..NUM_INSTANCES_PER_ROW).map(move |x| {
+        //             let x = SPACE_BETWEEN * (x as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
+        //             let z = SPACE_BETWEEN * (z as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
 
-                    let position = cgmath::Vector3 { x, y: 0.0, z };
+        //             let position = cgmath::Vector3 { x, y: 0.0, z };
 
-                    let rotation = if position.is_zero() {
-                        cgmath::Quaternion::from_axis_angle(
-                            cgmath::Vector3::unit_z(),
-                            cgmath::Deg(0.0),
-                        )
-                    } else {
-                        cgmath::Quaternion::from_axis_angle(position.normalize(), cgmath::Deg(0.0))
-                    };
+        //             let rotation = if position.is_zero() {
+        //                 cgmath::Quaternion::from_axis_angle(
+        //                     cgmath::Vector3::unit_z(),
+        //                     cgmath::Deg(0.0),
+        //                 )
+        //             } else {
+        //                 cgmath::Quaternion::from_axis_angle(position.normalize(), cgmath::Deg(0.0))
+        //             };
 
-                    Instance { position, rotation }
-                })
-            })
-            .collect::<Vec<_>>();
-        let instance_data = instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
+        //             Instance { position, rotation }
+        //         })
+        //     })
+        //     .collect::<Vec<_>>();
+        // let instance_data = instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
 
-        let instance_buffer = device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("Instance Buffer"),
-                contents: bytemuck::cast_slice(&instance_data),
-                usage: wgpu::BufferUsages::VERTEX,
-            }
-        );
+        // let instance_buffer = device.create_buffer_init(
+        //     &wgpu::util::BufferInitDescriptor {
+        //         label: Some("Instance Buffer"),
+        //         contents: bytemuck::cast_slice(&instance_data),
+        //         usage: wgpu::BufferUsages::VERTEX,
+        //     }
+        // );
 
         let depth_texture = texture::Texture::create_depth_texture(&device, &config, "depth_texture");
 
+        //to do
+        let useDeferredRenderer = false;
+
+        if useDeferredRenderer{
+            todo!();
+        }
 
         let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Render Pipeline Layout"),
@@ -454,48 +411,42 @@ impl State {
                 source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
             };
 
-            create_render_pipeline(&device, &render_pipeline_layout, config.format, Some(texture::Texture::DEPTH_FORMAT), &[model::ModelVertex::desc(), InstanceRaw::desc()], shader,)
+            create_render_pipeline(&device, &render_pipeline_layout, config.format, Some(texture::Texture::DEPTH_FORMAT), &[model::ModelVertex::desc(), model::InstanceRaw::desc()], shader,)
         };
 
-        let light_render_pipeline = {
-            let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Light Pipeline Layout"),
-                bind_group_layouts: &[&camera_bind_group_layout, &light_bind_group_layout],
-                push_constant_ranges: &[],
-            });
-            let shader = wgpu::ShaderModuleDescriptor {
-                label: Some("Light Shader"),
-                source: wgpu::ShaderSource::Wgsl(include_str!("light.wgsl").into()),
-            };
-            create_render_pipeline(
-                &device, 
-                &layout, 
-                config.format, 
-                Some(texture::Texture::DEPTH_FORMAT), 
-                &[model::ModelVertex::desc()], 
-                shader
-            )
-        };
 
         use std::time::{Duration,Instant};
         let start_loading_time = Instant::now();
         let mut obj_model = match file_type.clone().as_str() {
-            "opengl" => resources::load_model(&file_path, file_type.clone(), &device, &queue, &texture_bind_group_layout).await.unwrap(),
-            "default" => resources::load_model(&file_path, file_type.clone(), &device, &queue, &texture_bind_group_layout).await.unwrap(),
+            "opengl" => resources::load_model(&file_path, file_type.clone(), &device, &queue, &texture_bind_group_layout,1, cgmath::Vector3 { x: 0.0, y: 0.0, z: 0.0 }).await.unwrap(),
+            "default" => resources::load_model(&file_path, file_type.clone(), &device, &queue, &texture_bind_group_layout,1,cgmath::Vector3 { x: 0.0, y: 0.0, z: 0.0 }).await.unwrap(),
             _ => panic!("no file type given"),
         };
-
-        //obj_model = default_cube(&device, &queue, &texture_bind_group_layout).await.unwrap();
         let loading_duration = start_loading_time.elapsed();
         println!("total loading time {:?}" , loading_duration);
-        
-        //let light_mesh = resources::load_model("default_cube.obj", "opengl".to_string(), &device, &queue, &texture_bind_group_layout).await.unwrap();
+        let mut movable_model_counts = 0;
 
-        let test_mesh = resources::load_model("default_cube.obj", "opengl".to_string(), &device, &queue, &texture_bind_group_layout).await.unwrap();
+        let mut models = Vec::new();
+        models.push(obj_model);
+        //movable_model_counts +=1;
+        for i in 1..0 {
+        let test_mesh = resources::load_model("default_cube.obj",
+                "opengl".to_string(), 
+                &device, &queue, &texture_bind_group_layout,
+                i,cgmath::Vector3 { x: (i.to_f32().unwrap()*10.0 as f32),
+                y: (i.to_f32().unwrap()*2.0 as f32), z: 0.0 }).await.unwrap();
+
+        models.push(test_mesh);
+        movable_model_counts += i*i; 
+        println!("pushed : {i}")
+        } 
+        println!("total movable model/object : {movable_model_counts}");
+        
             
 
 
         Self {
+            free_cam,
             window,
             surface,
             device,
@@ -509,19 +460,17 @@ impl State {
             camera_uniform,
             camera_buffer,
             camera_bind_group,
-            instances,
-            instance_buffer,
             depth_texture,
-            obj_model,
+            models,
+            point_light,
+            point_light_buffer,
             light_uniform,
             light_buffer,
             light_bind_group,
-            light_render_pipeline,
-            //light_mesh,
             mouse_pressed: false,
+            //single point light to be removed after implementing movable light controller with ability to control each light in Vec<Light>
             movable_light,
             movable_light_controller,
-            test_mesh,
         }
     }
 
@@ -568,13 +517,44 @@ impl State {
         }
     }
 
+
     fn update(&mut self, dt: instant::Duration) {
         self.camera_controller.update_camera(&mut self.camera, dt);
         self.movable_light_controller.update_light(&mut self.movable_light, &mut self.light_uniform, dt);
-        // for mesh in self.test_mesh.meshes {
-        //     mesh.
-        // }
         self.camera_uniform.update_view_proj(&self.camera, &self.projection);
+        
+        
+        ///// test moving models, will be ignored when model len() !>1 ///
+        use rayon::prelude::*;
+        // for i in 0..self.models.len(){
+        //     if i != 0 {
+        //     self.models[i].test_move_model(i);
+            
+        //     }    
+        // };
+
+        if self.models.len() > 1{
+            let newpos_x_vec = (1..self.models.len()).into_par_iter().map(|i| model::test_move_model(self.models[i].instances[0].position.x ,i, dt)).collect::<Vec<_>>();
+            for i in 1..self.models.len(){
+                self.models[i].instances[0].position.x = newpos_x_vec[i-1]
+            }
+
+            for i in 0..self.models.len(){
+                if i != 0{
+                    self.models[i].instances = update_instance(i as i32, self.models[i].instances[0].position);
+                    let instance_data = self.models[i].instances.par_iter().map(model::Instance::to_raw).collect::<Vec<_>>();
+                    //let len = instance_data.len();
+                    //println!("model {i} , {len}");
+                    self.queue.write_buffer(&self.models[i].instance_buffer, 0, bytemuck::cast_slice(&instance_data)); 
+            }
+            
+        }
+        }
+
+        
+        /////////
+        
+        
         self.queue.write_buffer(&self.camera_buffer, 0,bytemuck::cast_slice(&[self.camera_uniform]));
         
         self.queue.write_buffer(&self.light_buffer, 0, bytemuck::cast_slice(&[self.light_uniform]));
@@ -616,18 +596,15 @@ impl State {
                 }),
             });
 
-            render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
-            
-            render_pass.set_pipeline(&self.light_render_pipeline);
+            //render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
 
             use crate::model::DrawModel;
             render_pass.set_pipeline(&self.render_pipeline);
-            render_pass.draw_model_instanced(
-                &self.obj_model,
-                0..self.instances.len() as u32,
-                &self.camera_bind_group,
-                &self.light_bind_group, // NEW
-            );
+            for model in &self.models {
+                render_pass.set_vertex_buffer(1, model.instance_buffer.slice(..) );
+                render_pass.draw_model_instanced(model, 0..model.instances.len() as u32, &self.camera_bind_group, &self.light_bind_group)
+            }
+            
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -636,20 +613,6 @@ impl State {
         Ok(())
     }
 
-}
-
-#[no_mangle]
-pub unsafe  extern "C" fn run_kanirenderer(file_path_cstring: *const c_char, file_type_c: *const c_char, fs_mode_c: *const c_char ){
-    let file_path_cstr = CStr::from_ptr(file_path_cstring).to_str().expect("no path provided");
-    let file_path: String =  file_path_cstr.into();
-    if file_path.is_empty(){
-        panic!("no file path provided")
-    }
-    let ft_cstr = CStr::from_ptr(file_type_c).to_str().unwrap_or("default");
-    let file_type:String = ft_cstr.into(); //.unwrap_or("default").try_into().unwrap_or("default".to_string());
-    let fs_cstr = CStr::from_ptr(fs_mode_c).to_str().unwrap_or("fullscreen");
-    let fullscreen_mode:String = fs_cstr.into(); //unwrap_or("fullscreen").try_into().unwrap_or("fullscreen".to_string());
-    pollster::block_on(run(file_path, file_type, fullscreen_mode));
 }
 
 pub async fn run(file_path: String, file_type:String, fullscreen_mode: String) {
@@ -678,6 +641,8 @@ pub async fn run(file_path: String, file_type:String, fullscreen_mode: String) {
     };
 
     
+
+    
     let mut state = State::new(window, file_path, file_type).await;
     let mut last_render_time = instant::Instant::now();
 
@@ -685,6 +650,7 @@ pub async fn run(file_path: String, file_type:String, fullscreen_mode: String) {
         Event::DeviceEvent { event: DeviceEvent::MouseMotion{delta,}, .. } => if state.mouse_pressed {
             state.camera_controller.process_mouse(delta.0, delta.1)
         }
+        
         
         Event::WindowEvent {
             ref event,
@@ -716,6 +682,8 @@ pub async fn run(file_path: String, file_type:String, fullscreen_mode: String) {
         Event::RedrawRequested(window_id) if window_id == state.window().id() => {
             let now = instant::Instant::now();
             let dt = now - last_render_time;
+            let fps = 1000000/dt.as_micros();
+            println!("fps : {fps}");
             last_render_time = now;
             state.update(dt);
             match state.render() {
@@ -736,4 +704,20 @@ pub async fn run(file_path: String, file_type:String, fullscreen_mode: String) {
         _ => {}
     }}
     );
+}
+
+use std::ffi::*;
+
+#[no_mangle]
+pub unsafe  extern "C" fn run_kanirenderer(file_path_cstring: *const c_char, file_type_c: *const c_char, fs_mode_c: *const c_char ){
+    let file_path_cstr = CStr::from_ptr(file_path_cstring).to_str().expect("no path provided");
+    let file_path: String =  file_path_cstr.into();
+    if file_path.is_empty(){
+        panic!("no file path provided")
+    }
+    let ft_cstr = CStr::from_ptr(file_type_c).to_str().unwrap_or("default");
+    let file_type:String = ft_cstr.into(); //.unwrap_or("default").try_into().unwrap_or("default".to_string());
+    let fs_cstr = CStr::from_ptr(fs_mode_c).to_str().unwrap_or("fullscreen");
+    let fullscreen_mode:String = fs_cstr.into(); //unwrap_or("fullscreen").try_into().unwrap_or("fullscreen".to_string());
+    pollster::block_on(run(file_path, file_type, fullscreen_mode));
 }

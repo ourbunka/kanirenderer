@@ -1,8 +1,9 @@
 use std::io::{BufReader, Cursor};
 use anyhow::Ok;
 use wgpu::util::DeviceExt;
-use crate::{model, texture};
+use crate::{model::{self, Instance}, texture};
 use cfg_if::cfg_if;
+use cgmath::{num_traits::ToPrimitive, perspective, prelude::*, Vector3};
 
 pub async fn load_string(file_name: &str) -> anyhow::Result<String> {
     cfg_if! {
@@ -59,13 +60,18 @@ pub async fn load_opengl_texture(file_name: &str, is_normal_map: bool, device: &
 }
 
 pub async fn load_model(
-    file_name: &str, 
+    mut file_name: &str, 
     file_type: String,
     device: &wgpu::Device, 
     queue: &wgpu::Queue, 
-    layout: &wgpu::BindGroupLayout, 
+    layout: &wgpu::BindGroupLayout,
+    instance: u32,
+    spawn_position: Vector3<f32> 
 ) -> anyhow::Result<model::Model> {
     let obj_text: String;
+    if file_name.is_empty(){
+        file_name = "default_cube.obj"
+    }
     match file_name {
         "default_cube.obj"   => obj_text = load_string(file_name).await.unwrap_or(include_str!("../res/cube.obj").to_string()),
         _                   => obj_text = load_string(file_name).await?,
@@ -259,7 +265,47 @@ pub async fn load_model(
         })
         .collect::<Vec<_>>();
 
-    Ok(model::Model {meshes, materials})
+        let NUM_INSTANCES_PER_ROW: u32 = instance;
+
+        const SPACE_BETWEEN: f32 = 3.0;
+
+        let instances = (0..NUM_INSTANCES_PER_ROW)
+            .flat_map(|z| {
+                (0..NUM_INSTANCES_PER_ROW).map(move |x| {
+                    let x = SPACE_BETWEEN * (x as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
+                    let z = SPACE_BETWEEN * (z as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
+
+                    let mut position = cgmath::Vector3 { x, y: 0.0, z };
+                    if instance == 1 {
+                        position = spawn_position
+                    }
+
+                    let rotation = if position.is_zero() {
+                        cgmath::Quaternion::from_axis_angle(
+                            cgmath::Vector3::unit_z(),
+                            cgmath::Deg(0.0),
+                        )
+                    }else if instance == 1 {
+                        cgmath::Quaternion::from_axis_angle(position.normalize(), cgmath::Deg(0.0))
+                    } else {
+                        cgmath::Quaternion::from_axis_angle(position.normalize(), cgmath::Deg(0.0))
+                    };
+                    
+                    model::Instance { position, rotation }
+                })
+            })
+            .collect::<Vec<_>>();
+        let instance_data = instances.iter().map(model::Instance::to_raw).collect::<Vec<_>>();
+
+        let instance_buffer = device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("Instance Buffer"),
+                contents: bytemuck::cast_slice(&instance_data),
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            }
+        );
+
+    Ok(model::Model {meshes, materials, instances, instance_buffer})
 }
 
 pub async fn load_default_cube(
@@ -267,6 +313,6 @@ device: &wgpu::Device,
 queue: &wgpu::Queue, 
 layout: &wgpu::BindGroupLayout, 
 ) -> anyhow::Result<model::Model> {
-    let default_cube = load_model("default_cube.obj", "opengl".to_string(), device, queue, layout).await?;
+    let default_cube = load_model("default_cube.obj", "opengl".to_string(), device, queue, layout,1, Vector3 { x: 0.0, y: 0.0, z: 0.0 }).await?;
     Ok(default_cube)
 }

@@ -42,6 +42,13 @@ struct Light {
 @group(2) @binding(0)
 var<uniform> light: Light;
 
+struct PointLights {
+    lights: array<Light>,
+}
+
+@group(2) @binding(1)
+var<storage, read> pointLights: PointLights;
+
 
 @vertex
 fn vs_main(
@@ -119,7 +126,42 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         specular_color = vec3(0.0);
     }
 
-    let result = (ambient_color + diffuse_color + specular_color) * object_color.xyz;
+    var result = (ambient_color + diffuse_color + specular_color) * object_color.xyz;
+
+// render over all light in Vec<light::Light> //
+    for (var i =0u; i < 1u; i++) {
+        let lightpos = pointLights.lights[i].position;
+        let lightcolor = pointLights.lights[i].color;
+        let lightrange = pointLights.lights[i].range;
+
+        let object_color: vec4<f32> = textureSample(t_diffuse, s_diffuse, in.tex_coords);
+        let object_normal: vec4<f32> = textureSample(t_normal, s_normal, in.tex_coords);
+
+        let light_distance = length(lightpos - in.position);
+        let attenuation = 2.0 / (1.0 + (lightrange * 0.0014) * light_distance + (lightrange * 0.000007) * (light_distance * light_distance)); 
+
+        let ambient_strength = 0.05;
+        let ambient_color = lightcolor * ambient_strength * attenuation;
+
+        let tangent_normal = object_normal.xyz * 2.0 - 1.0;
+        let light_dir = normalize(in.tangent_light_position - in.tangent_position);
+        let view_dir = normalize(in.tangent_view_position - in.tangent_position);
+
+        let half_dir = normalize(view_dir + light_dir);
+    
+        let diffuse_strength = max(dot(tangent_normal, light_dir), 0.0);
+        let diffuse_color = lightcolor * diffuse_strength * attenuation;
+
+        let specular_strength = pow(max(dot(tangent_normal, half_dir), 0.0), 32.0);
+        var specular_color = specular_strength * lightcolor * attenuation;
+    
+        if (diffuse_strength <= 0.35) {
+            specular_color = vec3(0.0);
+        }
+        let newresult = (ambient_color + diffuse_color + specular_color) * object_color.xyz;
+        result += newresult;
+
+    }
 
     return vec4<f32>(result, object_color.a);
 }

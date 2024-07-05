@@ -127,9 +127,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     var result = (ambient_color + diffuse_color + specular_color) * object_color.xyz;
-
+    var len = arrayLength(&pointLights.lights);
 // render over all light in Vec<light::Light> //
-    for (var i =0u; i < 1u; i++) {
+    for (var i =0u; i < len ; i++) {
         let lightpos = pointLights.lights[i].position;
         let lightcolor = pointLights.lights[i].color;
         let lightrange = pointLights.lights[i].range;

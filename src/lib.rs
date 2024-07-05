@@ -285,7 +285,6 @@ impl State {
             color: [1.0, 1.0, 1.0],
             range: 1.0,
         };
-        //let light_mesh = load_model("default_cube.obj", "opengl".to_string(), &device, &queue, &texture_bind_group_layout).await.unwrap();
 
         let movable_light = light::Light::new([0.0, 300.0, 0.0], cgmath::Deg(-90.0),[1.0,1.0,1.0]);
 

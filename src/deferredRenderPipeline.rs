@@ -4,7 +4,8 @@ use winit::dpi::PhysicalSize;
 pub fn new_gbuffer_texture_bind_group(
     device: &wgpu::Device,
     g_buffer_texture_layout: &wgpu::BindGroupLayout,
-    size: PhysicalSize<u32>){
+    size: PhysicalSize<u32>)-> (TextureView, TextureView, TextureView ,BindGroup){
+
     let gbuffer_texture_2d_float16 = device.create_texture(&wgpu::TextureDescriptor{
         size: Extent3d { width: size.width, height: size.height, ..Default::default()},
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
@@ -15,7 +16,7 @@ pub fn new_gbuffer_texture_bind_group(
         label: None,
         view_formats: &[wgpu::TextureFormat::Rgba16Float]
     });
-    let gbuffer_texture_2d_float16_view = &gbuffer_texture_2d_float16.create_view(&wgpu::TextureViewDescriptor{
+    let gbuffer_texture_2d_float16_view = gbuffer_texture_2d_float16.create_view(&wgpu::TextureViewDescriptor{
         ..Default::default()
     });
     let gbuffer_texture_albedo = device.create_texture(&wgpu::TextureDescriptor{
@@ -28,7 +29,7 @@ pub fn new_gbuffer_texture_bind_group(
         label: None,
         view_formats: &[wgpu::TextureFormat::Bgra8Unorm]
     });
-    let gbuffer_texture_albedo_view = &gbuffer_texture_albedo.create_view(&wgpu::TextureViewDescriptor{
+    let gbuffer_texture_albedo_view = gbuffer_texture_albedo.create_view(&wgpu::TextureViewDescriptor{
         ..Default::default()
     });
     let depth_texture = device.create_texture(&wgpu::TextureDescriptor{
@@ -41,7 +42,7 @@ pub fn new_gbuffer_texture_bind_group(
         label: None,
         view_formats: &[wgpu::TextureFormat::Depth24Plus]
     });
-    let depth_texture_view = &depth_texture.create_view(&wgpu::TextureViewDescriptor{
+    let depth_texture_view = depth_texture.create_view(&wgpu::TextureViewDescriptor{
         ..Default::default()
     });
     
@@ -64,6 +65,48 @@ pub fn new_gbuffer_texture_bind_group(
         ],
         label: None,
     });
+    (gbuffer_texture_2d_float16_view, gbuffer_texture_albedo_view, depth_texture_view, gbuffer_texture_bind_group)
+}
+
+pub fn create_gbuffer_texture_bind_group_layout(
+    device: &wgpu::Device,
+    bind_group: &BindGroup){
+    let gbuffer_texture_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor{
+        entries: &[
+            wgpu::BindGroupLayoutEntry{
+                binding:0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture { 
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false }, 
+                    view_dimension: wgpu::TextureViewDimension::D2, 
+                    multisampled: false 
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry{
+                binding:1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture { 
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false }, 
+                    view_dimension: wgpu::TextureViewDimension::D2, 
+                    multisampled: false 
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry{
+                binding:2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture { 
+                    sample_type: wgpu::TextureSampleType::Depth, 
+                    view_dimension: wgpu::TextureViewDimension::D2, 
+                    multisampled: false 
+                },
+                count: None,
+            }
+        ],
+        label: Some("G Buffer Bind Group Layout"),
+    });
+
 }
 
 pub fn create_write_gbuffer_pipeline(
@@ -154,9 +197,7 @@ pub fn create_deferred_render_pipeline(
     color_format: wgpu::TextureFormat,
     depth_format: Option<wgpu::TextureFormat>,
     vertex_layouts: &[wgpu::VertexBufferLayout],
-    shader: wgpu::ShaderModuleDescriptor,
-) -> (wgpu::ShaderModule, wgpu::PipelineLayout,wgpu::RenderPipeline) {
-    let shader = device.create_shader_module(shader);
+) -> (wgpu::ShaderModule, wgpu::ShaderModule, wgpu::PipelineLayout,wgpu::RenderPipeline) {
     let deferred_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor{
         label:Some("Deferred Render Pipeline Layout"),
         bind_group_layouts: & [
@@ -166,18 +207,33 @@ pub fn create_deferred_render_pipeline(
         push_constant_ranges: &[],
     });
 
+    let shader_vertex_texture_quad = wgpu::ShaderModuleDescriptor{
+        label:Some("Vertex Texture Quad Shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("vertexTextureQuad.wgsl").into()),
+    };
+
+    let shader_mod_vertex_texture_quad = device.create_shader_module(shader_vertex_texture_quad);
+
+    let shader_fragment_deferred_rendering = wgpu::ShaderModuleDescriptor{
+        label:Some("Fragment Deferred Rendering Shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("fragmentDeferredRendering.wgsl").into()),
+    };
+
+    let shader_mod_fragment_deferred_rendering = device.create_shader_module(shader_fragment_deferred_rendering);
+
+
     let deferred_render_pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
         label: Some("Deferred Render Pipeline"),
         layout: Some(&deferred_pipeline_layout),
         //vertextquad.wgsl
         vertex: wgpu::VertexState {
-            module: &shader,
+            module: &shader_mod_vertex_texture_quad,
             entry_point: "vs_main",
             buffers: vertex_layouts,
         },
         //fragmentdeferredrendering.wgsl
         fragment: Some(wgpu::FragmentState {
-            module: &shader,
+            module: &shader_mod_fragment_deferred_rendering,
             entry_point: "fs_main",
             targets: &[Some(wgpu::ColorTargetState {
                 format: color_format,
@@ -211,5 +267,5 @@ pub fn create_deferred_render_pipeline(
         },
         multiview: None,
     });
-    (shader, deferred_pipeline_layout, deferred_render_pipeline)
+    (shader_mod_vertex_texture_quad, shader_mod_fragment_deferred_rendering, deferred_pipeline_layout, deferred_render_pipeline)
 }

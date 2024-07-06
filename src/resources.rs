@@ -1,5 +1,6 @@
 use std::io::{BufReader, Cursor};
 use anyhow::Ok;
+use rayon::iter::IntoParallelIterator;
 use wgpu::util::DeviceExt;
 use crate::{model::{self, Instance}, texture};
 use cfg_if::cfg_if;
@@ -304,8 +305,10 @@ pub async fn load_model(
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             }
         );
+    
+    let instance_num = instance as i32;
 
-    Ok(model::Model {meshes, materials, instances, instance_buffer})
+    Ok(model::Model {meshes, materials,instances, instance_buffer,instance_num })
 }
 
 pub async fn load_default_cube(

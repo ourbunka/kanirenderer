@@ -392,6 +392,8 @@ impl State {
 
         if useDeferredRenderer{
             todo!();
+        } else {
+            
         }
 
         let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -416,7 +418,7 @@ impl State {
 
         use std::time::{Duration,Instant};
         let start_loading_time = Instant::now();
-        let mut obj_model = match file_type.clone().as_str() {
+        let obj_model = match file_type.clone().as_str() {
             "opengl" => resources::load_model(&file_path, file_type.clone(), &device, &queue, &texture_bind_group_layout,1, cgmath::Vector3 { x: 0.0, y: 0.0, z: 0.0 }).await.unwrap(),
             "default" => resources::load_model(&file_path, file_type.clone(), &device, &queue, &texture_bind_group_layout,1,cgmath::Vector3 { x: 0.0, y: 0.0, z: 0.0 }).await.unwrap(),
             _ => panic!("no file type given"),
@@ -429,14 +431,15 @@ impl State {
         models.push(obj_model);
         //movable_model_counts +=1;
         for i in 1..0 {
+        let j = i;
         let test_mesh = resources::load_model("default_cube.obj",
                 "opengl".to_string(), 
                 &device, &queue, &texture_bind_group_layout,
-                i,cgmath::Vector3 { x: (i.to_f32().unwrap()*10.0 as f32),
+                j,cgmath::Vector3 { x: (i.to_f32().unwrap()*10.0 as f32),
                 y: (i.to_f32().unwrap()*2.0 as f32), z: 0.0 }).await.unwrap();
 
         models.push(test_mesh);
-        movable_model_counts += i*i; 
+        movable_model_counts += j*j; 
         println!("pushed : {i}")
         } 
         println!("total movable model/object : {movable_model_counts}");
@@ -523,16 +526,11 @@ impl State {
         self.camera_uniform.update_view_proj(&self.camera, &self.projection);
         
         
-        ///// test moving models, will be ignored when model len() !>1 ///
+        
         use rayon::prelude::*;
-        // for i in 0..self.models.len(){
-        //     if i != 0 {
-        //     self.models[i].test_move_model(i);
-            
-        //     }    
-        // };
 
         if self.models.len() > 1{
+            ///// test moving models, will be ignored when model len() !>1 ///
             let newpos_x_vec = (1..self.models.len()).into_par_iter().map(|i| model::test_move_model(self.models[i].instances[0].position.x ,i, dt)).collect::<Vec<_>>();
             for i in 1..self.models.len(){
                 self.models[i].instances[0].position.x = newpos_x_vec[i-1]
@@ -540,7 +538,7 @@ impl State {
 
             for i in 0..self.models.len(){
                 if i != 0{
-                    self.models[i].instances = update_instance(i as i32, self.models[i].instances[0].position);
+                    self.models[i].instances = update_instance(self.models[i].instance_num, self.models[i].instances[0].position);
                     let instance_data = self.models[i].instances.par_iter().map(model::Instance::to_raw).collect::<Vec<_>>();
                     //let len = instance_data.len();
                     //println!("model {i} , {len}");
@@ -681,8 +679,8 @@ pub async fn run(file_path: String, file_type:String, fullscreen_mode: String) {
         Event::RedrawRequested(window_id) if window_id == state.window().id() => {
             let now = instant::Instant::now();
             let dt = now - last_render_time;
-            let fps = 1000000/dt.as_micros();
-            println!("fps : {fps}");
+            //let fps = 1000000/dt.as_micros();
+            //println!("fps : {fps}");
             last_render_time = now;
             state.update(dt);
             match state.render() {

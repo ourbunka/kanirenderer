@@ -134,13 +134,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let lightcolor = pointLights.lights[i].color;
         let lightrange = pointLights.lights[i].range;
 
-        let object_color: vec4<f32> = textureSample(t_diffuse, s_diffuse, in.tex_coords);
-        let object_normal: vec4<f32> = textureSample(t_normal, s_normal, in.tex_coords);
+        //let object_color: vec4<f32> = textureSample(t_diffuse, s_diffuse, in.tex_coords);
+        //let object_normal: vec4<f32> = textureSample(t_normal, s_normal, in.tex_coords);
 
         let light_distance = length(lightpos - in.position);
         let attenuation = 2.0 / (1.0 + (lightrange * 0.0014) * light_distance + (lightrange * 0.000007) * (light_distance * light_distance)); 
 
-        let ambient_strength = 0.05;
+        //let ambient_strength = 0.05;
         let ambient_color = lightcolor * ambient_strength * attenuation;
 
         let tangent_normal = object_normal.xyz * 2.0 - 1.0;

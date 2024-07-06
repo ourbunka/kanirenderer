@@ -61,6 +61,7 @@ pub struct Model {
     pub materials: Vec<Material>,
     pub instances: Vec<Instance>,
     pub instance_buffer: wgpu::Buffer,
+    pub instance_num: i32,
 }
 
 impl Model {

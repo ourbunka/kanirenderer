@@ -12,6 +12,12 @@ import (
 	"runtime"
 )
 
+// fix panicked at 'Initializing the event loop outside of the main thread by
+// locking kanirenderer to main thread, which required by winit
+func init() {
+	runtime.LockOSThread()
+}
+
 // using kanirenderer in go
 func main() {
 	log.Println("kanirenderer in go")
@@ -22,15 +28,14 @@ func main() {
 	var mode string
 	flag.StringVar(&mode, "mode", "fullscreen", "enter window mode")
 	flag.Parse()
+	if path == "" {
+		log.Panicln("no files path provided, please provide -path=/path/to/yourobj")
+	}
 	filePath := C.CString(path)
 	fileType := C.CString(filet)
 	fullScreen := C.CString(mode)
-	//fix panicked at 'Initializing the event loop outside of the main thread by
-	//locking kanirenderer to main thread, which required by winit
-	go func() {
-		runtime.LockOSThread()
-		C.run_kanirenderer(filePath, fileType, fullScreen)
-	}()
+
+	C.run_kanirenderer(filePath, fileType, fullScreen)
 	//keep main() running
 	select {}
 }

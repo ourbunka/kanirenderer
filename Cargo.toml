@@ -17,6 +17,7 @@ cgmath = "0.18"
 tobj = { version = "4.0.0" , features = [ "async",]}
 cfg-if = "1"
 instant = "0.1"
+rayon = "1.10.0"
 
 [[res]]
 name = "res"
@@ -39,3 +40,9 @@ path = "src/main.rs"
 
 [lib]
 crate-type = ["rlib","dylib"]
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "z"
+strip = "debuginfo"

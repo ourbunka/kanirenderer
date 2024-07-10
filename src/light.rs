@@ -1,9 +1,12 @@
 use cgmath::*;
 use cgmath::num_traits::ToPrimitive;
+use wgpu::{util::{self, DeviceExt}, Buffer};
 use winit::event::*;
 use winit::dpi::PhysicalPosition;
 use instant::Duration;
-use std::f32::consts::FRAC_PI_2;
+use std::{f32::consts::FRAC_PI_2, future::IntoFuture};
+
+use crate::{load_model, model};
 
 
 #[rustfmt::skip]
@@ -17,11 +20,12 @@ pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::new(
 
 const SAFE_FRAC_PI_2: f32 = FRAC_PI_2 - 0.0001;
 
-#[derive(Debug)]
+//#[derive(Debug)]
 pub struct Light {
     pub position: Point3<f32>,
     yaw: Rad<f32>,
     pub range: f32,
+    pub color: [f32;3],
 }
 
 #[repr(C)]
@@ -33,14 +37,50 @@ pub struct LightUniform {
     pub range: f32,
 }
 
+#[repr(C)]
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct PointLightData {
+    pub position: [f32; 3],
+    pub _padding: u32,
+    pub color: [f32; 3],
+    pub range: f32,
+}
+
+
 impl Light {
-    pub fn new<V: Into<Point3<f32>>, Y: Into<Rad<f32>>,>(position: V, yaw: Y,) -> Self {
+    pub fn new<V: Into<Point3<f32>>, Y: Into<Rad<f32>>,>(position: V, yaw: Y,color: [f32;3]) -> Self {
+        
         Self {
             position: position.into(),
             yaw: yaw.into(),
-            range: 1.0,
+            range: 0.5,
+            color: color,
         }
     }
+
+    pub fn generate_point_light_data(&self) -> PointLightData {
+        let position = Vector3 { x: self.position.x, y: self.position.y, z: self.position.z};
+        //let color = [1.0 as f32,1.0,1.0];
+        let color = self.color;
+        let range = self.range;
+        PointLightData {
+            position: position.into(),
+            _padding: 0,
+            color: color,
+            range: range
+        }
+    }
+}
+
+pub fn init_new_point_lights_buffer(point_light_data : Vec<PointLightData>, device: &wgpu::Device, ) -> Buffer {
+    let new_buffer = device.create_buffer_init(
+        &wgpu::util::BufferInitDescriptor {
+        label: Some("Point Lights Buffer"),
+        contents: bytemuck::cast_slice(&point_light_data),
+        usage: wgpu::BufferUsages::STORAGE,
+        }    
+    );
+    new_buffer
 }
 
 pub struct MovableLightController {

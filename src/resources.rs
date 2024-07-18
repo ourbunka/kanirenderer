@@ -92,7 +92,7 @@ pub async fn load_model(
             let mat_text: String;
             match file_name {
                 "default_cube.obj"   => mat_text = load_string(&p).await.unwrap_or(include_str!("../res/cube.mtl").to_string()),
-                _                   => mat_text = load_string(&p).await.unwrap(),
+                _                   => mat_text = load_string(&p).await.unwrap_or(include_str!("../res/cube.mtl").to_string()),
             }
             // = load_string(&p).await.unwrap();
             tobj::load_mtl_buf(&mut BufReader::new(Cursor::new(mat_text)))
@@ -108,14 +108,14 @@ pub async fn load_model(
         let normal_bytes = include_bytes!("../res/default_normal.png");
         match file_type.as_str() {
             "default" =>    {   if !m.diffuse_texture.is_none() {
-                                    diffuse_texture = load_texture(&m.diffuse_texture.unwrap().as_str(), false, device, queue).await?;
+                                    diffuse_texture = load_texture(&m.diffuse_texture.unwrap().as_str(), false, device, queue).await.unwrap_or(texture::Texture::from_bytes(device, queue, normal_bytes, "fallback diffuse texture", false).unwrap());
                                 } else {
                                     println!("no diffuse textures, using fallback texture");
                                     diffuse_texture = texture::Texture::from_bytes(device, queue, normal_bytes, "using a default normal map as fallback diffuse texture", false).unwrap();
                                 }
                 
                                 if !&m.normal_texture.is_none() {
-                                    normal_texture = load_texture(&m.normal_texture.unwrap().as_str(), true, device, queue).await?;
+                                    normal_texture = load_texture(&m.normal_texture.unwrap().as_str(), true, device, queue).await.unwrap_or(texture::Texture::from_bytes(device, queue, normal_bytes, "fallback normal texture", true).unwrap());
                                 } else {
                                     println!("no normal textures, using fallback texture");
                                     normal_texture = texture::Texture::from_bytes(device, queue, normal_bytes, "default_normal", true).unwrap();
@@ -123,13 +123,13 @@ pub async fn load_model(
                                 }
                             },
             "opengl" =>     {   if !m.diffuse_texture.is_none() {
-                                    diffuse_texture = load_opengl_texture(&m.diffuse_texture.unwrap().as_str(), false, device, queue, ).await?;
+                                    diffuse_texture = load_opengl_texture(&m.diffuse_texture.unwrap().as_str(), false, device, queue, ).await.unwrap_or(texture::Texture::from_bytes(device, queue, normal_bytes, "fallback diffuse texture", false).unwrap());
                                 } else {
                                     println!("no diffuse textures, using fallback texture");
                                     diffuse_texture = texture::Texture::from_bytes(device, queue, normal_bytes, "using a default normal map as fallback diffuse texture", false).unwrap();
                                 }
                                 if !&m.normal_texture.is_none() {
-                                    normal_texture = load_opengl_texture(&m.normal_texture.unwrap().as_str(), true, device, queue).await?;
+                                    normal_texture = load_opengl_texture(&m.normal_texture.unwrap().as_str(), true, device, queue).await.unwrap_or(texture::Texture::from_bytes(device, queue, normal_bytes, "fallback normal texture", true).unwrap());
                                 } else {
                                     println!("no normal textures, using fallback texture");
                                     normal_texture = texture::Texture::from_bytes(device, queue, normal_bytes, "default_normal", true).unwrap();

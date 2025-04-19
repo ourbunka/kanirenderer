@@ -2,6 +2,7 @@ use std::{ops::Range, usize};
 
 use cgmath::{num_traits::ToPrimitive, perspective, prelude::*, Point3, Vector3};
 use instant::Duration;
+use rand::Rng;
 use crate::texture::Texture;
 
 pub trait Vertex {
@@ -65,39 +66,28 @@ pub struct Model {
 }
 
 impl Model {
-    pub fn test_move_model(& mut self , i :usize) {
+    pub fn test_move_model(posx: f32 , i :usize, dt: Duration) ->f32 {
+        let mut newpos = posx;
         if i % 2 == 0{
-            self.instances[0].position.x += 1.0;  
+            newpos += (1.0_f32 * (&dt.as_millis().to_f32().unwrap()));  
         } else {
-            self.instances[0].position.x -= 1.0;  
+            newpos -= (1.0_f32 * (&dt.as_millis().to_f32().unwrap()));
         }
-        if self.instances[0].position.x < -100.0 {
-            self.instances[0].position.x = 100.0
+        if posx < -100.0 {
+            newpos = 100.0
         }
-        if self.instances[0].position.x > 100.0 {
-            self.instances[0].position.x = -100.0
+        if posx > 100.0 {
+            newpos = -100.0
         }
-        
-        //let instance_data = self.instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
-
+        newpos
+        //let instance_data = self.instances.iter().map(Instance::to_raw).collect::<Vec<_>>();    
     }
 }
-
-pub fn test_move_model(posx: f32 , i :usize, dt: Duration) ->f32 {
-    let mut newpos = posx;
-    if i % 2 == 0{
-        newpos += 1.0;  
-    } else {
-        newpos -= 1.0;  
-    }
-    if posx < -100.0 {
-        newpos = 100.0
-    }
-    if posx > 100.0 {
-        newpos = -100.0
-    }
+pub fn test_move_model_vec3(vec_pos: Vector3<f32> , dt: Duration) ->Vector3<f32> {
+    let mut rng = rand::rng();
+    let newpos = vec_pos - (Vector3::new(rng.random_range(-10.0..10.0), rng.random_range(-10.0..10.0), rng.random_range(-10.0..10.0)) * (dt.as_millis().to_f32().unwrap()));
     newpos
-    //let instance_data = self.instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
+    //let instance_data = self.instances.iter().map(Instance::to_raw).collect::<Vec<_>>();    
 
 }
 
@@ -264,14 +254,14 @@ pub fn update_instance(num_instances:i32, current_position: Vector3<f32>, ) -> V
             .into_par_iter()
             .flat_map_iter(|z| {
                 (0..NUM_INSTANCES_PER_ROW).map(move |x| {
-                    let x = (SPACE_BETWEEN * (x as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0))+current_position.x;
+                    let x = (SPACE_BETWEEN * (x as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0));
                     let z = (SPACE_BETWEEN * (z as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0));
-                    let y = (SPACE_BETWEEN * (z as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0))+(instance.to_f32().unwrap()*2.0 as f32);
+                    let y = (SPACE_BETWEEN * (z as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0));
 
-                    let mut position = cgmath::Vector3 { x, y, z };
-                    if instance == 0 {
-                        position = current_position
-                    }
+                    let mut position = current_position + cgmath::Vector3 { x, y, z };
+                    // if instance == 0 {
+                    //     position = current_position
+                    // }
                     let rotation = if position.is_zero() {
                         cgmath::Quaternion::from_axis_angle(
                             cgmath::Vector3::unit_z(),

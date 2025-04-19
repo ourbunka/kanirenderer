@@ -275,8 +275,10 @@ pub async fn load_model(
                 (0..NUM_INSTANCES_PER_ROW).map(move |x| {
                     let x = SPACE_BETWEEN * (x as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
                     let z = SPACE_BETWEEN * (z as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
+                    let y = (SPACE_BETWEEN * (z as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0));
 
-                    let mut position = cgmath::Vector3 { x, y: 0.0, z };
+
+                    let mut position = spawn_position + cgmath::Vector3 { x, y, z };
                     if instance == 1 {
                         position = spawn_position
                     }

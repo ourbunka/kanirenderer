@@ -1,8 +1,8 @@
 use std::env;
-
 use kanirenderer_viewer::run;
 
 fn main() {
+    env::set_var("RUST_BACKTRACE", "1");
     println!("Hello!");
     println!("");
     println!("Loading...");
@@ -30,7 +30,14 @@ fn main() {
         "fullscreen" => println!("fullscreen mode"),
         _ => fullscreen_mode = "windowed".to_string(),
     }
-    println!("{:?}, {:?}", file_path, file_type);
+    let use_hdr_string = std::env::args().nth(4).unwrap_or("false".to_string());
+    let mut use_hdr = false;
+    match use_hdr_string.as_str(){
+        "true" => {use_hdr = true}
+        "false" => {use_hdr = false}
+        _ => {}
+    }
+    println!("{:?}, {:?}, {:?}", file_path, file_type, use_hdr);
     
-    pollster::block_on(run(file_path, file_type, fullscreen_mode));
+    pollster::block_on(run(file_path, file_type, fullscreen_mode, use_hdr));
 }

@@ -1,4 +1,6 @@
-use std::vec;
+#![allow(warnings)] 
+
+use std::{clone, vec};
 mod texture;
 mod model;
 mod resources;
@@ -7,10 +9,11 @@ mod light;
 mod deferredRenderPipeline;
 
 use bytemuck::Contiguous;
-use light::{init_new_point_lights_buffer, PointLightData};
+use light::{init_new_directional_lights_Uniform, init_new_point_lights_buffer, DirectionalLight, DirectionalLightUniformData, PointLightData};
 use model::{update_instance, Model, Vertex};
 use cgmath::{num_traits::ToPrimitive, perspective, prelude::*};
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use rand::Rng;
+use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use texture::Texture;
 use wgpu::util::DeviceExt;
 use winit::{
@@ -19,7 +22,7 @@ use winit::{
     window::{WindowBuilder, Fullscreen, self}, dpi::PhysicalSize,
 };
 use winit::window::Window;
-
+use wgpu::TextureFormat;
 use crate::resources::*;
 
 
@@ -60,6 +63,11 @@ struct LightUniform {
     _padding2: u32,
 }
 
+enum RenderOutputMode {
+    Colored,
+    Wireframe,
+}
+
 struct State {
     free_cam : bool,
     surface: wgpu::Surface,
@@ -69,6 +77,7 @@ struct State {
     size: winit::dpi::PhysicalSize<u32>,
     window: Window,
     render_pipeline: wgpu::RenderPipeline,
+    wireframe_pipeline: wgpu::RenderPipeline,
     camera: camera::Camera,
     projection: camera::Projection,
     camera_controller: camera::CameraController,
@@ -84,9 +93,13 @@ struct State {
     light_bind_group: wgpu::BindGroup,
     point_light: Vec<light::Light>,
     point_light_buffer: wgpu::Buffer,
+    directional_light: light::DirectionalLight,
+    directional_light_uniform_data: light::DirectionalLightUniformData,
+    directional_light_uniform: wgpu::Buffer,
     movable_light: light::Light,
     movable_light_controller: light::MovableLightController,
     mouse_pressed: bool,
+    render_output_mode: RenderOutputMode,
 }
 
 fn create_render_pipeline(
@@ -144,13 +157,75 @@ fn create_render_pipeline(
     })
 }
 
+fn create_wireframe_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    color_format: wgpu::TextureFormat,
+    depth_format: Option<wgpu::TextureFormat>,
+    vertex_layouts: &[wgpu::VertexBufferLayout],
+    shader: wgpu::ShaderModuleDescriptor,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(shader);
+
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("Wireframe Pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: "vs_main",
+            buffers: vertex_layouts,
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: "fs_main",
+            targets: &[Some(wgpu::ColorTargetState {
+                format: color_format,
+                blend: Some(wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        operation: wgpu::BlendOperation::Add,
+                        src_factor: wgpu::BlendFactor::SrcAlpha,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                    },
+                    alpha: wgpu::BlendComponent::REPLACE,
+                }),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            polygon_mode: wgpu::PolygonMode::Line,
+            unclipped_depth: false,
+            conservative: false,
+        },
+        depth_stencil: depth_format.map(|format| wgpu::DepthStencilState {
+            format,
+            depth_write_enabled: true,
+            depth_compare: wgpu::CompareFunction::Less,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState {
+            count: 1,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
+        multiview: None,
+    })
+}
+fn optional_features() -> wgpu::Features {
+        wgpu::Features::POLYGON_MODE_LINE
+    }
+
 impl State {
-    async fn new(window: Window, file_path: String, file_type:String) -> Self {
+    async fn new(window: Window, file_path: String, file_type:String, use_hdr: bool) -> Self {
         let free_cam = true;
         let size = window.inner_size();
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
+            backends: wgpu::Backends::VULKAN,
             dx12_shader_compiler: Default::default(),
         });
 
@@ -158,7 +233,7 @@ impl State {
 
         let adapter= instance.request_adapter(
             &wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::default(),
+                power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
             },
@@ -166,7 +241,7 @@ impl State {
 
         let (device, queue) = adapter.request_device(
             &wgpu::DeviceDescriptor {
-                features: wgpu::Features::empty(),
+                features: optional_features(),
                 limits: if cfg!(target_arch = "wasm32") {
                     wgpu::Limits::downlevel_webgl2_defaults()
                 } else {
@@ -178,18 +253,22 @@ impl State {
         ).await.unwrap();
 
         let surface_caps = surface.get_capabilities(&adapter);
-
-        let surface_format = surface_caps.formats.iter()
+        
+        let mut surface_format = surface_caps.formats.iter()
             .copied()
             .find(|f| f.is_srgb())
             .unwrap_or(surface_caps.formats[0]);
-
+        if use_hdr{
+            surface_format = TextureFormat::Rgba16Float;
+        }
+        println!("{:?}", surface_format);
+        
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
             width: size.width,
             height: size.height,
-            present_mode: wgpu::PresentMode::AutoVsync,//surface_caps.present_modes[2],
+            present_mode: wgpu::PresentMode::Immediate,//surface_caps.present_modes[2],
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
         };
@@ -238,7 +317,7 @@ impl State {
 
         let projection = camera::Projection::new(config.width, config.height, cgmath::Deg(45.0), 0.1, 100.0);
         
-        let camera_controller = camera::CameraController::new(200.0, 0.4);
+        let camera_controller = camera::CameraController::new(300.0, 0.4);
 
         let mut camera_uniform = CameraUniform::new();
         camera_uniform.update_view_proj(&camera, &projection);
@@ -278,6 +357,53 @@ impl State {
             label: Some("camera_bind_group"),
         });
 
+        let shadow_depth_texture_size = 1024;
+        let shadow_depth_texture_size_extent3d = wgpu::Extent3d{
+            width: shadow_depth_texture_size,
+            height: shadow_depth_texture_size,
+            depth_or_array_layers:1,
+        };
+        let shadow_depth_texture =  device.create_texture(
+            &wgpu::TextureDescriptor{
+                label: Some("shadow depth texture"),
+                size: shadow_depth_texture_size_extent3d,
+                mip_level_count:1,
+                sample_count:1,
+                dimension:wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Depth32Float,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            }
+        );
+        let shadow_depth_texture_view = shadow_depth_texture.create_view(
+            &wgpu::TextureViewDescriptor::default()
+        );
+        
+        //let smp_vertex_buffer = wgpu::VertexBufferLayout
+
+        let shadow_depth_uniform_buffer_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor{
+            entries: &[
+                wgpu::BindGroupLayoutEntry{
+                    binding:0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer { 
+                        ty: wgpu::BufferBindingType::Uniform, 
+                        has_dynamic_offset: false, 
+                        min_binding_size: None 
+                    },
+                    count: None,
+                }
+            ],
+            label: None
+        });
+
+        // let smp_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { 
+        //     label: None, 
+        //     entries: &[
+        //         wgpu::nomd
+        //     ],
+        // });
+
 
         let light_uniform = light::LightUniform {
             position: [0.0, 300.0, 0.0],
@@ -286,7 +412,7 @@ impl State {
             range: 1.0,
         };
 
-        let movable_light = light::Light::new([0.0, 300.0, 0.0], cgmath::Deg(-90.0),[1.0,1.0,1.0]);
+        let movable_light = light::Light::new([0.0, 300.0, 0.0], cgmath::Deg(-90.0),[0.01,0.01,0.01], 0.05);
 
         let movable_light_controller = light::MovableLightController::new(300.0, 1.0);
 
@@ -301,13 +427,34 @@ impl State {
         //for spawning multiple point light
         let light_num = 1;
         for i in 0..light_num {
-            let color_r = i as f32 / 10.0;
-            let new_light = light::Light::new([0.0, i.to_f32().unwrap()*100.0, 0.0], cgmath::Deg(-90.0), [0.50,0.50,0.50]);
+            let color_r = 0.1;
+            let mut rng = rand::rng();
+            let random_r = rng.random_range(0.0..1.0).to_f32().unwrap();
+            let random_g = rng.random_range(0.0..1.0).to_f32().unwrap();
+            let random_b = rng.random_range(0.0..1.0).to_f32().unwrap();
+            let random_pos = [
+                rng.random_range(-1500.0..1500.0).to_f32().unwrap(), 
+                rng.random_range(0.0..55.0).to_f32().unwrap(), 
+                rng.random_range(-1500.0..1500.0).to_f32().unwrap()
+                ];
+            let new_light = light::Light::new(random_pos, cgmath::Deg(-90.0), [0.01,0.01,0.01], 0.01);
             point_light.push(new_light);
             let new_light_data = point_light[i].generate_point_light_data();
             point_light_data.push(new_light_data);
         }
         let point_light_buffer = init_new_point_lights_buffer(point_light_data, &device);
+
+        let directional_light = light::DirectionalLight::new([0.2, -1.0, -0.3], [1.0,1.0,1.0]);
+
+        
+        let directional_light_uniform = directional_light.generate_directional_light_data();
+        
+        let directional_light_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Directional Light Buffer"),
+            contents: bytemuck::cast_slice(&[directional_light_uniform]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        //let directional_light_uniform = init_new_directional_lights_Uniform(directional_light_uniform_data.clone(), &device);
 
         let light_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             entries: &[
@@ -330,6 +477,16 @@ impl State {
                     min_binding_size: None,
                 },
                 count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
             }
             ],
             label: None,
@@ -345,6 +502,10 @@ impl State {
                 wgpu::BindGroupEntry{
                 binding:1,
                 resource: point_light_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry{
+                binding:2,
+                resource: directional_light_buffer.as_entire_binding(),
             }
             ],
             label: None,
@@ -396,6 +557,55 @@ impl State {
             
         }
 
+        let shadow_depth_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor{
+            label:None,
+            bind_group_layouts: &[
+                &shadow_depth_uniform_buffer_bind_group_layout,
+                &camera_bind_group_layout,
+            ],
+            push_constant_ranges: &[],
+        });
+
+        // let shadow_depth_render_pipeline = {
+        //     let shader_module_desc = wgpu::ShaderModuleDescriptor{
+        //         label: None,
+        //         source: wgpu::ShaderSource::Wgsl(include_str!("vertexShadow.wgsl").into()),
+        //     };
+        //     let shader = device.create_shader_module(shader_module_desc);
+        //     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor{
+        //         label: None,
+        //         layout: Some(&shadow_depth_pipeline_layout),
+        //         vertex: wgpu::VertexState {
+        //             module: &shader,
+        //             entry_point: "vs_main",
+        //             buffers: &[model::ModelVertex::desc(), model::InstanceRaw::desc()],
+        //         },
+        //         fragment: None,
+        //         primitive: wgpu::PrimitiveState {
+        //             topology: wgpu::PrimitiveTopology::TriangleList,
+        //             strip_index_format: None,
+        //             front_face: wgpu::FrontFace::Ccw,
+        //             cull_mode: Some(wgpu::Face::Back),
+        //             polygon_mode: wgpu::PolygonMode::Fill,
+        //             unclipped_depth: false,
+        //             conservative: false,
+        //         },
+        //         depth_stencil: Some(texture::Texture::DEPTH_FORMAT).map(|format| wgpu::DepthStencilState{
+        //             format,
+        //             depth_write_enabled: true,
+        //             depth_compare: wgpu::CompareFunction::Less,
+        //             stencil: wgpu::StencilState::default(),
+        //             bias: wgpu::DepthBiasState::default(),
+        //         }),
+        //         multisample: wgpu::MultisampleState {
+        //             count: 1,
+        //             mask: !0,
+        //             alpha_to_coverage_enabled: false,
+        //         },
+        //         multiview: None,
+        //     })
+        // };
+
         let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Render Pipeline Layout"),
             bind_group_layouts: &[
@@ -412,8 +622,45 @@ impl State {
                 source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
             };
 
-            create_render_pipeline(&device, &render_pipeline_layout, config.format, Some(texture::Texture::DEPTH_FORMAT), &[model::ModelVertex::desc(), model::InstanceRaw::desc()], shader,)
+            create_render_pipeline(&device, 
+                &render_pipeline_layout, 
+                config.format, 
+                Some(wgpu::TextureFormat::Depth24PlusStencil8), 
+                &[model::ModelVertex::desc(), 
+                model::InstanceRaw::desc()], 
+                shader)
         };
+
+        let wireframe_pipeline = {
+            let shader = wgpu::ShaderModuleDescriptor{
+                label: Some("Wireframe Shader"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("shader_wireframe.wgsl").into()),
+            };
+            create_wireframe_pipeline(&device, 
+                &render_pipeline_layout, 
+                config.format, 
+                Some(wgpu::TextureFormat::Depth24PlusStencil8), 
+                &[model::ModelVertex::desc(), 
+                model::InstanceRaw::desc()], 
+                shader)
+        };
+
+        // let depth_texture_texture = device.create_texture(&wgpu::TextureDescriptor{
+        //     label: Some("depth texture"),
+        //     size: wgpu::Extent3d { 
+        //         width: config.width, 
+        //         height: config.height, 
+        //         depth_or_array_layers: 1, 
+        //     },
+        //     mip_level_count:1,
+        //     sample_count:1,
+        //     dimension: wgpu::TextureDimension::D2,
+        //     format: wgpu::TextureFormat::Depth24PlusStencil8,
+        //     usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        //     view_formats: &[],
+        // });
+
+        
 
 
         use std::time::{Duration,Instant};
@@ -430,21 +677,21 @@ impl State {
         let mut models = Vec::new();
         models.push(obj_model);
         //movable_model_counts +=1;
-        for i in 1..0 {
-        let j = i;
+        let mut rng = rand::rng();
+        for i in 1..=0 {
         let test_mesh = resources::load_model("default_cube.obj",
                 "opengl".to_string(), 
                 &device, &queue, &texture_bind_group_layout,
-                j,cgmath::Vector3 { x: (i.to_f32().unwrap()*10.0 as f32),
-                y: (i.to_f32().unwrap()*2.0 as f32), z: 0.0 }).await.unwrap();
+                5,cgmath::Vector3 { x: (rng.random_range(-1500.0..1500.0) as f32),
+                y: (rng.random_range(30.0..100.0)  as f32), z: (rng.random_range(-1500.0..1500.0)  as f32) }).await.unwrap();
 
-        models.push(test_mesh);
-        movable_model_counts += j*j; 
-        println!("pushed : {i}")
+        models.push(test_mesh); 
+        println!("pushed : {i}");
+        movable_model_counts +=1;
         } 
         println!("total movable model/object : {movable_model_counts}");
         
-            
+        let mut render_output_mode = RenderOutputMode::Colored;
 
 
         Self {
@@ -456,6 +703,7 @@ impl State {
             config,
             size,
             render_pipeline,
+            wireframe_pipeline,
             camera,
             projection,
             camera_controller,
@@ -466,6 +714,9 @@ impl State {
             models,
             point_light,
             point_light_buffer,
+            directional_light,
+            directional_light_uniform_data: directional_light_uniform,
+            directional_light_uniform: directional_light_buffer,
             light_uniform,
             light_buffer,
             light_bind_group,
@@ -473,6 +724,7 @@ impl State {
             //single point light to be removed after implementing movable light controller with ability to control each light in Vec<Light>
             movable_light,
             movable_light_controller,
+            render_output_mode
         }
     }
 
@@ -504,8 +756,20 @@ impl State {
                     ..
                 },
                 ..
-            } => {  self.movable_light_controller.process_keyboard(*key, *state);
-                    self.camera_controller.process_keyboard(*key, *state)
+            } => {  
+                    self.movable_light_controller.process_keyboard(*key, *state);
+                    self.camera_controller.process_keyboard(*key, *state);
+
+                    //handle render mode switching, to redo
+                    if *key == VirtualKeyCode::Tab && *state == ElementState::Released {
+                       match self.render_output_mode {
+                            RenderOutputMode::Colored => {self.render_output_mode = RenderOutputMode::Wireframe; true}
+                            RenderOutputMode::Wireframe => {self.render_output_mode = RenderOutputMode::Colored; true}
+                        } 
+                    } else {
+                        false
+                    }
+                    
                 }
             WindowEvent::MouseWheel { delta, .. } => {
                 self.camera_controller.process_scroll(delta);
@@ -527,26 +791,24 @@ impl State {
         
         
         
-        use rayon::prelude::*;
+        // use rayon::prelude::*;
 
-        if self.models.len() > 1{
-            ///// test moving models, will be ignored when model len() !>1 ///
-            let newpos_x_vec = (1..self.models.len()).into_par_iter().map(|i| model::test_move_model(self.models[i].instances[0].position.x ,i, dt)).collect::<Vec<_>>();
-            for i in 1..self.models.len(){
-                self.models[i].instances[0].position.x = newpos_x_vec[i-1]
-            }
+        // if self.models.len() > 1{
+        //     ///// test moving models, will be ignored when model len() !>1 ///
+        //     let newpos = (1..self.models.len()).into_par_iter().map(|i| model::test_move_model_vec3(self.models[i].instances[0].position , dt)).collect::<Vec<_>>();
+        //     for i in 1..self.models.len(){
+        //         self.models[i].instances[0].position = newpos[i-1]
+        //     }
 
-            for i in 0..self.models.len(){
-                if i != 0{
-                    self.models[i].instances = update_instance(self.models[i].instance_num, self.models[i].instances[0].position);
-                    let instance_data = self.models[i].instances.par_iter().map(model::Instance::to_raw).collect::<Vec<_>>();
-                    //let len = instance_data.len();
-                    //println!("model {i} , {len}");
-                    self.queue.write_buffer(&self.models[i].instance_buffer, 0, bytemuck::cast_slice(&instance_data)); 
-            }
+        //     for i in 0..self.models.len(){
+        //         if i != 0{
+        //             self.models[i].instances = update_instance(self.models[i].instance_num, self.models[i].instances[0].position);
+        //             let instance_data = self.models[i].instances.par_iter().map(model::Instance::to_raw).collect::<Vec<_>>();
+        //             self.queue.write_buffer(&self.models[i].instance_buffer, 0, bytemuck::cast_slice(&instance_data)); 
+        //     }
             
-        }
-        }
+        // }
+        // }
 
         
         /////////
@@ -555,6 +817,7 @@ impl State {
         self.queue.write_buffer(&self.camera_buffer, 0,bytemuck::cast_slice(&[self.camera_uniform]));
         
         self.queue.write_buffer(&self.light_buffer, 0, bytemuck::cast_slice(&[self.light_uniform]));
+        self.queue.write_buffer(&self.directional_light_uniform, 0, bytemuck::cast_slice(&[self.directional_light_uniform_data]));
 
     }
 
@@ -596,12 +859,25 @@ impl State {
             //render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
 
             use crate::model::DrawModel;
-            render_pass.set_pipeline(&self.render_pipeline);
-            for model in &self.models {
-                render_pass.set_vertex_buffer(1, model.instance_buffer.slice(..) );
-                render_pass.draw_model_instanced(model, 0..model.instances.len() as u32, &self.camera_bind_group, &self.light_bind_group)
+            match self.render_output_mode {
+                RenderOutputMode::Colored => {
+                    //println!("rendering Colored");
+                    render_pass.set_pipeline(&self.render_pipeline);
+                    for model in &self.models {
+                        render_pass.set_vertex_buffer(1, model.instance_buffer.slice(..) );
+                        render_pass.draw_model_instanced(model, 0..model.instances.len() as u32, &self.camera_bind_group, &self.light_bind_group)
+                    }
+                }
+                RenderOutputMode::Wireframe => {
+                    render_pass.set_pipeline(&self.wireframe_pipeline);
+                    //println!("rendering Wireframe");
+                    for model in &self.models{
+                        render_pass.set_vertex_buffer(1, model.instance_buffer.slice(..) );
+
+                        render_pass.draw_model_instanced(model, 0..model.instances.len() as u32, &self.camera_bind_group, &self.light_bind_group);
+                    }
+                }
             }
-            
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -612,7 +888,9 @@ impl State {
 
 }
 
-pub async fn run(file_path: String, file_type:String, fullscreen_mode: String) {
+
+
+pub async fn run(file_path: String, file_type:String, fullscreen_mode: String, use_hdr: bool) {
     env_logger::init();
     
     let event_loop = EventLoop::new();
@@ -628,8 +906,8 @@ pub async fn run(file_path: String, file_type:String, fullscreen_mode: String) {
                                 .expect("no monitor found!");
                             println!("Monitor: {:?}", monitor.name());
 
-                            let mut mode = monitor.video_modes().next().expect("no mode found");
-                            let fullscreen = Some(Fullscreen::Exclusive(mode.clone()));
+                            let mut mode = monitor.video_modes().nth(0).unwrap(); //next().expect("no mode found");
+                            let fullscreen = Some(Fullscreen::Borderless(None)); //Some(Fullscreen::Exclusive(mode.clone()));
                             window.set_fullscreen(fullscreen);
 
         },
@@ -640,11 +918,13 @@ pub async fn run(file_path: String, file_type:String, fullscreen_mode: String) {
     
 
     
-    let mut state = State::new(window, file_path, file_type).await;
+    let mut state = State::new(window, file_path, file_type, use_hdr).await;
     let mut last_render_time = instant::Instant::now();
 
     event_loop.run(move | event, _, control_flow | {*control_flow = ControlFlow::Poll; match event {
         Event::DeviceEvent { event: DeviceEvent::MouseMotion{delta,}, .. } => if state.mouse_pressed {
+            state.camera_controller.process_mouse(delta.0, delta.1)
+        } else {
             state.camera_controller.process_mouse(delta.0, delta.1)
         }
         
@@ -703,10 +983,11 @@ pub async fn run(file_path: String, file_type:String, fullscreen_mode: String) {
     );
 }
 
+
 use std::ffi::*;
 
 #[no_mangle]
-pub unsafe  extern "C" fn run_kanirenderer(file_path_cstring: *const c_char, file_type_c: *const c_char, fs_mode_c: *const c_char ){
+pub unsafe  extern "C" fn run_kanirenderer(file_path_cstring: *const c_char, file_type_c: *const c_char, fs_mode_c: *const c_char, hdr_c: *const c_char ){
     let file_path_cstr = CStr::from_ptr(file_path_cstring).to_str().expect("no path provided");
     let file_path: String =  file_path_cstr.into();
     if file_path.is_empty(){
@@ -716,5 +997,12 @@ pub unsafe  extern "C" fn run_kanirenderer(file_path_cstring: *const c_char, fil
     let file_type:String = ft_cstr.into(); //.unwrap_or("default").try_into().unwrap_or("default".to_string());
     let fs_cstr = CStr::from_ptr(fs_mode_c).to_str().unwrap_or("fullscreen");
     let fullscreen_mode:String = fs_cstr.into(); //unwrap_or("fullscreen").try_into().unwrap_or("fullscreen".to_string());
-    pollster::block_on(run(file_path, file_type, fullscreen_mode));
+    let hdr_cstr = CStr::from_ptr(hdr_c).to_str().unwrap_or("false");
+    let mut use_hdr: bool = false;
+    match hdr_cstr {
+        "true" => {use_hdr = true}
+        "false" => {use_hdr = false}
+        _ => {}
+    }
+    pollster::block_on(run(file_path, file_type, fullscreen_mode, use_hdr));
 }

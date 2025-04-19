@@ -46,14 +46,63 @@ pub struct PointLightData {
     pub range: f32,
 }
 
+pub struct DirectionalLight {
+    pub color: [f32;3],
+    pub _padding: f32,
+    pub light_direction: [f32;3],
+    pub _padding2: f32,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct DirectionalLightUniformData {
+    pub color: [f32;3],
+    pub _padding: f32,
+    pub light_direction: [f32;3],
+    pub _padding2: f32,
+}
+
+impl DirectionalLight {
+    pub fn new(direction: [f32;3],color: [f32;3]) -> Self {
+        Self {
+            color: color,
+            _padding: 1.0,
+            light_direction: direction,
+            _padding2:1.0,
+        }
+    }
+
+    pub fn generate_directional_light_data(&self) -> DirectionalLightUniformData {
+        let direction = self.light_direction;
+        let color = self.color;
+        DirectionalLightUniformData {
+            color: color,
+            _padding: 1.0,
+            light_direction: direction,
+            _padding2: 1.0,
+        }
+    }
+}
+
+pub fn init_new_directional_lights_Uniform(directional_light_uniform : DirectionalLightUniformData, device: &wgpu::Device, ) -> wgpu::Buffer {
+    let new_buffer = device.create_buffer_init(
+        &wgpu::util::BufferInitDescriptor {
+        label: Some("Directional Lights Uniform"),
+        contents: bytemuck::cast_slice(&[directional_light_uniform]),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        }    
+    );
+    new_buffer
+}
+
 
 impl Light {
-    pub fn new<V: Into<Point3<f32>>, Y: Into<Rad<f32>>,>(position: V, yaw: Y,color: [f32;3]) -> Self {
+    pub fn new<V: Into<Point3<f32>>, Y: Into<Rad<f32>>,>(position: V, yaw: Y,color: [f32;3], range : f32) -> Self {
         
         Self {
             position: position.into(),
             yaw: yaw.into(),
-            range: 0.5,
+            range: range,
             color: color,
         }
     }
@@ -93,6 +142,7 @@ pub struct MovableLightController {
     speed: f32,
     sensitivity: f32,
     range: f32,
+    light_color: Vector3<f32>
 }
 
 impl MovableLightController {
@@ -107,6 +157,7 @@ impl MovableLightController {
             speed,
             sensitivity,
             range: 1.0,
+            light_color: Vector3::new(1.0, 1.0, 1.0)
         }
     }
 
@@ -154,6 +205,18 @@ impl MovableLightController {
                 }
                 true
             }
+            VirtualKeyCode::LBracket =>{
+                if state == ElementState::Pressed && self.light_color.x >0.1 {
+                    self.light_color -= [0.1,0.1,0.1].into();
+                }
+                true
+            }
+            VirtualKeyCode::RBracket => {
+                if state == ElementState::Pressed && self.light_color.x <10.0 {
+                    self.light_color += [0.1,0.1,0.1].into();
+                }
+                true
+            }
             _ => false,
         }
     }
@@ -176,5 +239,6 @@ impl MovableLightController {
         light_uniform.position = light.position.into();
         light.range = self.range.into();
         light_uniform.range = self.range.into();
+        light_uniform.color = self.light_color.into();
     }
 }

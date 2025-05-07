@@ -152,6 +152,7 @@ pub trait  DrawModel<'a> {
         material: &'a Material, 
         camera_bind_group: &'a wgpu::BindGroup,
         light_bind_group: &'a wgpu::BindGroup,
+        shadow_bind_group: &'a wgpu::BindGroup,
     );
 
     fn draw_mesh_instanced(
@@ -161,6 +162,7 @@ pub trait  DrawModel<'a> {
         instances: Range<u32>,
         camera_bind_group: &'a wgpu::BindGroup,
         light_bind_group: &'a wgpu::BindGroup,
+        shadow_bind_group: &'a wgpu::BindGroup,
     );
 
     fn draw_model(
@@ -168,6 +170,7 @@ pub trait  DrawModel<'a> {
         model: &'a Model,
         camera_bind_group: &'a wgpu::BindGroup,
         light_bind_group: &'a wgpu::BindGroup,
+        shadow_bind_group: &'a wgpu::BindGroup,
     );
 
     fn draw_model_instanced(
@@ -176,6 +179,7 @@ pub trait  DrawModel<'a> {
         instances: Range<u32>,
         camera_bind_group: &'a wgpu::BindGroup,
         light_bind_group: &'a wgpu::BindGroup,
+        shadow_bind_group: &'a wgpu::BindGroup,
     );
 }
 
@@ -183,8 +187,15 @@ impl<'a, 'b> DrawModel<'b> for wgpu::RenderPass<'a>
 where
     'b: 'a,
 {
-    fn draw_mesh(&mut self, mesh: &'b Mesh, material: &'b Material, camera_bind_group: &'b wgpu::BindGroup, light_bind_group: &'b wgpu::BindGroup) {
-        self.draw_mesh_instanced(mesh, material, 0..1, camera_bind_group, light_bind_group);
+    fn draw_mesh(
+        &mut self, 
+        mesh: &'b Mesh, 
+        material: &'b Material, 
+        camera_bind_group: &'b wgpu::BindGroup,
+        light_bind_group: &'b wgpu::BindGroup,
+        shadow_bind_group: &'b wgpu::BindGroup,
+    ) {
+        self.draw_mesh_instanced(mesh, material, 0..1, camera_bind_group, light_bind_group, shadow_bind_group);
     }
 
     fn draw_mesh_instanced(
@@ -194,12 +205,14 @@ where
             instances: Range<u32>,
             camera_bind_group: &'b wgpu::BindGroup,
             light_bind_group: &'b wgpu::BindGroup,
+            shadow_bind_group: &'b wgpu::BindGroup,
         ) {
         self.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
         self.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         self.set_bind_group(0, &material.bind_group, &[]);
         self.set_bind_group(1, camera_bind_group, &[]);
         self.set_bind_group(2, light_bind_group, &[]);
+        self.set_bind_group(3, shadow_bind_group, &[]);
         self.draw_indexed(0..mesh.num_elements, 0, instances);
     }
 
@@ -208,8 +221,10 @@ where
             model: &'b Model,
             camera_bind_group: &'b wgpu::BindGroup,
             light_bind_group: &'b wgpu::BindGroup,
+            shadow_bind_group: &'b wgpu::BindGroup,
+
         ) {
-        self.draw_model_instanced(model, 0..1, camera_bind_group, light_bind_group);
+        self.draw_model_instanced(model, 0..1, camera_bind_group, light_bind_group, shadow_bind_group);
     }
 
     fn draw_model_instanced(
@@ -218,18 +233,19 @@ where
             instances: Range<u32>,
             camera_bind_group: &'b wgpu::BindGroup,
             light_bind_group: &'b wgpu::BindGroup,
+            shadow_bind_group: &'b wgpu::BindGroup,
         ) {
         for mesh in &model.meshes {
             if !&model.materials.is_empty() {
                 let material = &model.materials[mesh.material];
-                self.draw_mesh_instanced(mesh, material, instances.clone(), camera_bind_group, light_bind_group);
+                self.draw_mesh_instanced(mesh, material, instances.clone(), camera_bind_group, light_bind_group, shadow_bind_group);
             }
             
         }
     }
 }
 
-
+#[derive(Clone)]
 pub struct Instance {
     pub position: cgmath::Vector3<f32>,
     pub rotation: cgmath::Quaternion<f32>,
@@ -244,43 +260,12 @@ pub struct InstanceRaw {
     pub _padding: u32,
 }
 
-pub fn update_instance(num_instances:i32, current_position: Vector3<f32>, ) -> Vec<Instance>{
-    const SPACE_BETWEEN: f32 = 3.0;
-    let NUM_INSTANCES_PER_ROW = num_instances;
-    let instance = NUM_INSTANCES_PER_ROW*NUM_INSTANCES_PER_ROW;
-    //let spawn_position = current_position;
+pub fn update_instance_position_rotation(instances: &Instance, dt: Duration) -> Instance{
     use rayon::prelude::*;
-    let instances = (0..NUM_INSTANCES_PER_ROW)
-            .into_par_iter()
-            .flat_map_iter(|z| {
-                (0..NUM_INSTANCES_PER_ROW).map(move |x| {
-                    let x = (SPACE_BETWEEN * (x as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0));
-                    let z = (SPACE_BETWEEN * (z as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0));
-                    let y = (SPACE_BETWEEN * (z as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0));
-
-                    let mut position = current_position + cgmath::Vector3 { x, y, z };
-                    // if instance == 0 {
-                    //     position = current_position
-                    // }
-                    let rotation = if position.is_zero() {
-                        cgmath::Quaternion::from_axis_angle(
-                            cgmath::Vector3::unit_z(),
-                            cgmath::Deg(0.0),
-                        )
-                    }else if instance == 1 {
-                        cgmath::Quaternion::from_axis_angle(position.normalize(), cgmath::Deg(0.0))
-                    } else {
-                        cgmath::Quaternion::from_axis_angle(position.normalize(), cgmath::Deg(0.0))
-                    };
-                    
-                    Instance { position, rotation }
-                })
-            })
-            .collect::<Vec<_>>();
-    instances
+    let new_pos = test_move_model_vec3(instances.position, dt);
+            
+    Instance { position: new_pos, rotation: instances.rotation }
 }
-
-
 
 impl Instance {
     pub fn to_raw(&self) -> InstanceRaw {

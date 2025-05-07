@@ -4,7 +4,7 @@ use rayon::iter::IntoParallelIterator;
 use wgpu::util::DeviceExt;
 use crate::{model::{self, Instance}, texture};
 use cfg_if::cfg_if;
-use cgmath::{num_traits::ToPrimitive, perspective, prelude::*, Vector3};
+use cgmath::{num_traits::ToPrimitive, perspective, prelude::*, Quaternion, Vector3};
 
 pub async fn load_string(file_name: &str) -> anyhow::Result<String> {
     cfg_if! {
@@ -266,36 +266,16 @@ pub async fn load_model(
         })
         .collect::<Vec<_>>();
 
-        let NUM_INSTANCES_PER_ROW: u32 = instance;
-
         const SPACE_BETWEEN: f32 = 3.0;
 
-        let instances = (0..NUM_INSTANCES_PER_ROW)
-            .flat_map(|z| {
-                (0..NUM_INSTANCES_PER_ROW).map(move |x| {
-                    let x = SPACE_BETWEEN * (x as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
-                    let z = SPACE_BETWEEN * (z as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
-                    let y = (SPACE_BETWEEN * (z as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0));
-
-
-                    let mut position = spawn_position + cgmath::Vector3 { x, y, z };
-                    if instance == 1 {
-                        position = spawn_position
-                    }
-
-                    let rotation = if position.is_zero() {
-                        cgmath::Quaternion::from_axis_angle(
-                            cgmath::Vector3::unit_z(),
-                            cgmath::Deg(0.0),
-                        )
-                    }else if instance == 1 {
-                        cgmath::Quaternion::from_axis_angle(position.normalize(), cgmath::Deg(0.0))
-                    } else {
-                        cgmath::Quaternion::from_axis_angle(position.normalize(), cgmath::Deg(0.0))
-                    };
-                    
-                    model::Instance { position, rotation }
-                })
+        let instances = (0..instance)
+            .map(|i| {
+                let i_f = i.to_f32().unwrap();
+                let i_f_end = i_f*10.0;
+                let pos = rand::random_range(i_f..=i_f_end);
+                let position = Vector3 { x: pos, y: pos, z: pos };
+                let rotation = Quaternion{ v: Vector3 { x: 0.0, y: 0.0, z: 0.0 }, s: 0.0};
+                model::Instance { position, rotation }
             })
             .collect::<Vec<_>>();
         let instance_data = instances.iter().map(model::Instance::to_raw).collect::<Vec<_>>();

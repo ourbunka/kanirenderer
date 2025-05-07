@@ -32,6 +32,10 @@ struct VertexOutput {
     @location(2) tangent_light_position: vec3<f32>,
     @location(3) tangent_view_position: vec3<f32>,
     @location(4) position: vec3<f32>,
+    @location(5) tangent_matrix_c0: vec3<f32>,
+    @location(6) tangent_matrix_c1: vec3<f32>,
+    @location(7) tangent_matrix_c2: vec3<f32>,
+    @location(8) world_position: vec4<f32>,
 };
 
 struct Light {
@@ -39,11 +43,20 @@ struct Light {
     color: vec3<f32>,
     range: f32,
 }
+struct PointLight {
+    position: vec3<f32>,
+    color: vec3<f32>,
+    range: f32,
+    tangent_light_position: vec3<f32>,
+}
 @group(2) @binding(0)
 var<uniform> light: Light;
 
+@group(2) @binding(1)
+var<uniform> pointLight: PointLight;
+
 struct PointLights {
-    lights: array<Light>,
+    lights: array<PointLight>,
 }
 
 @group(2) @binding(1)
@@ -52,6 +65,8 @@ var<storage, read> pointLights: PointLights;
 struct DirectionalLightUniformData {
     color: vec3<f32>,
     light_direction: vec3<f32>,
+    intensity: f32,
+    view_projection: mat4x4<f32>,
 }
 
 @group(2) @binding(2)
@@ -90,12 +105,19 @@ fn vs_main(
     out.tangent_view_position = tangent_matrix * camera.view_pos.xyz;
     out.tangent_light_position = tangent_matrix * light.position;
     out.position = model.position;
-    
+    out.tangent_matrix_c0 = tangent_matrix[0];
+    out.tangent_matrix_c1 = tangent_matrix[1];
+    out.tangent_matrix_c2 = tangent_matrix[2];
+    out.world_position = world_position;
     return out;
 }
 
-
  // Fragment shader
+
+fn reinnhard_tonemap(input: vec3<f32>)->vec3<f32>{
+    let mapped_color = input.rgb / (input.rgb + vec3(1.0));
+    return mapped_color;
+}
 
 @group(0) @binding(0)
 var t_diffuse: texture_2d<f32>;
@@ -106,17 +128,44 @@ var t_normal: texture_2d<f32>;
 @group(0) @binding(3)
 var s_normal: sampler;
 
+@group(3) @binding(0)
+var shadow_map: texture_depth_2d;
+@group(3) @binding(1)
+var shadow_sampler: sampler_comparison;
+
+
+fn sample_shadow_pcf(uv: vec2<f32>, depth: f32) -> f32 {
+    let size = vec2<f32>(textureDimensions(shadow_map));
+    let texel_size = 1.0 / size;
+    var shadow = 0.0;
+    let kernel_size = 1;
+    for (var y = -kernel_size; y <= kernel_size; y = y + 1) {
+        for (var x = -kernel_size; x <= kernel_size; x = x + 1) {
+            let offset = vec2<f32>(f32(x), f32(y)) * texel_size;
+            shadow = shadow + textureSampleCompare(shadow_map, shadow_sampler, uv + offset, depth);
+        }
+    }
+    return shadow / f32((2 * kernel_size + 1) * (2 * kernel_size + 1));
+}
+
 @fragment
 
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let object_color: vec4<f32> = textureSample(t_diffuse, s_diffuse, in.tex_coords);
-    let object_normal: vec4<f32> = textureSample(t_normal, s_normal, in.tex_coords);
-
+    var object_color: vec3<f32> = textureSample(t_diffuse, s_diffuse, in.tex_coords).rgb;
+    let object_normal: vec3<f32> = textureSample(t_normal, s_normal, in.tex_coords).xyz;
     let light_distance = length(light.position - in.position);
-    let attenuation = 2.0 / (1.0 + (light.range * 0.0014) * light_distance + (light.range * 0.000007) * (light_distance * light_distance)); 
 
-    let ambient_strength = 0.75;
-    let ambient_color = light.color * ambient_strength * attenuation;
+    let constant = 1.0;
+    let linear = 0.09;
+    let quadratic = 0.032;
+    
+    // Adjust attenuation to respect the light's range
+    let attenuation = 1.0 / (constant + linear * light_distance + quadratic * light_distance * light_distance);
+    let range_attenuation = clamp(1.0 - pow(light_distance / light.range, 4.0), 0.0, 1.0);
+    
+    let ambient_light_color = vec3<f32>(20.0, 20.0, 20.0);
+    let ambient_strength = 0.0005;
+    let ambient_color = ambient_light_color * ambient_strength;
 
     var tangent_normal = object_normal.xyz * 2.0 - 1.0;
     tangent_normal = normalize(tangent_normal);
@@ -126,72 +175,69 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let half_dir = normalize(view_dir + light_dir);
     
     let diffuse_strength = max(dot(tangent_normal, light_dir), 0.0);
-    let diffuse_color = light.color * diffuse_strength * attenuation;
+    let diffuse_color = light.color * diffuse_strength;
 
     let specular_strength = pow(max(dot(tangent_normal, half_dir), 0.0), 32.0);
-    var specular_color = specular_strength * light.color * attenuation;
-    
-//    if (diffuse_strength <= 0.35) {
-//        specular_color = vec3(0.0);
-//    }
-    var result = (ambient_color + diffuse_color + specular_color) * object_color.xyz;
+    var specular_color = specular_strength * light.color;
+
+    var result = ambient_color * object_color;
+    result += ((diffuse_color + specular_color)*attenuation*range_attenuation)* object_color;
     
     //directional light
-//    let dl_light_dir = normalize(-directionalLight.light_direction);
-//    let diffuse = vec3<f32>(0.5, 0.5, 0.5);
-//    let specular = vec3<f32>(1.0, 1.0, 1.0);
-//    let dl_diff = max(dot(tangent_normal, dl_light_dir), 0.0);
-//    let dl_diffuse = diffuse * dl_diff ;
+    let dl_light_dir = normalize(-directionalLight.light_direction);
+    let dl_diffuse_factor = max(dot(tangent_normal, dl_light_dir), 0.0);
+    let dl_diffuse_color = dl_diffuse_factor* directionalLight.color * 10.0 ; //10.0 intensity
 
-//    let dl_view_dir = max(normalize( + view_dir),0.0);
-//    let dl_specular_strength = pow(max(dot(tangent_normal, dl_half_dir), 0.0), 32.0);
-//    var dl_specular_color = directionalLight.color * dl_specular_strength ;
+    let dl_view_dir = normalize(view_dir);
+    let dl_half_dir = normalize(dl_light_dir+dl_view_dir);
+    let dl_specular_factor = pow(max(dot(tangent_normal, dl_half_dir), 0.0), 32.0);
+    var dl_specular_color = dl_specular_factor* directionalLight.color * 10.0 * 0.5 ; //0.5 is specular strength
     
-//    if (dl_diffuse_strength <= 0.35) {
-//        dl_specular_color = vec3(0.0);
-//    }
-//    let dl_result = dl_diffuse * object_color.xyz;
-//    result += dl_result;
+    let light_space_pos = directionalLight.view_projection * in.world_position; //vec4<f32>(in.position, 1.0); //in.tangent_position, 1.0);
+    let ndc = light_space_pos.xyz/light_space_pos.w;
+    let shadow_uv = vec2<f32>(ndc.x *0.5+0.5, 1.0-(ndc.y * 0.5+ 0.5));
+    let shadow_depth = ndc.z;
+    let shadow_factor = sample_shadow_pcf(shadow_uv, shadow_depth);  //textureSampleCompare(shadow_map, shadow_sampler, shadow_uv, shadow_depth);
     
+    let dl_result = (dl_diffuse_color + dl_specular_color) *shadow_factor * object_color.xyz;
+    result += dl_result;
+   
 
 
-    
-    var len = arrayLength(&pointLights.lights);
+    let tangent_matrix = mat3x3<f32>(in.tangent_matrix_c0, in.tangent_matrix_c1, in.tangent_matrix_c2);
+    var lights = arrayLength(&pointLights.lights);
 // render over all light in Vec<light::Light> //
-    for (var i =0u; i < len ; i++) {
+    for (var i =0u; i < lights ; i++) {
         let lightpos = pointLights.lights[i].position;
         let lightcolor = pointLights.lights[i].color;
         let lightrange = pointLights.lights[i].range;
 
-        //let object_color: vec4<f32> = textureSample(t_diffuse, s_diffuse, in.tex_coords);
-        //let object_normal: vec4<f32> = textureSample(t_normal, s_normal, in.tex_coords);
-
         let light_distance = length(lightpos - in.position);
-        let attenuation = 2.0 / (1.0 + (lightrange * 0.0014) * light_distance + (lightrange * 0.000007) * (light_distance * light_distance)); 
 
-        //let ambient_strength = 0.05;
-        //let ambient_color = lightcolor * ambient_strength * attenuation;
-
+        let constant = 1.0;
+        let linear = 0.09;
+        let quadratic = 0.032;
+    
+        // Adjust attenuation to respect the light's range
+        let attenuation = 1.0 / (constant + linear * light_distance + quadratic * light_distance * light_distance);
+        let range_attenuation = clamp(1.0 - pow(light_distance / lightrange, 4.0), 0.0, 1.0);
+        
         let tangent_normal = object_normal.xyz * 2.0 - 1.0;
-        let light_dir = normalize(in.tangent_light_position - in.tangent_position);
+        let light_dir = normalize((tangent_matrix*lightpos) - in.tangent_position);
         let view_dir = normalize(in.tangent_view_position - in.tangent_position);
 
         let half_dir = normalize(view_dir + light_dir);
     
         let diffuse_strength = max(dot(tangent_normal, light_dir), 0.0);
-        let diffuse_color = lightcolor * diffuse_strength * attenuation;
+        let diffuse_color = lightcolor * diffuse_strength;
 
         let specular_strength = pow(max(dot(tangent_normal, half_dir), 0.0), 32.0);
-        var specular_color = specular_strength * lightcolor * attenuation;
+        var specular_color = specular_strength * lightcolor;
     
-//        if (diffuse_strength <= 0.35) {
-//            specular_color = vec3(0.0);
-//        }
-        let newresult = (diffuse_color + specular_color) * object_color.xyz;
+        let newresult = ((diffuse_color + specular_color)*attenuation*range_attenuation)* object_color;
         result += newresult;
 
     }
-
-
-    return vec4<f32>(result, object_color.a);
+    let out = reinnhard_tonemap(result);
+    return vec4<f32>(out,1.0);
 }

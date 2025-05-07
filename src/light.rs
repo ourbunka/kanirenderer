@@ -44,13 +44,15 @@ pub struct PointLightData {
     pub _padding: u32,
     pub color: [f32; 3],
     pub range: f32,
+    pub tangent_light_position: [f32;3],
+    pub _padding2: u32,
 }
 
 pub struct DirectionalLight {
     pub color: [f32;3],
     pub _padding: f32,
     pub light_direction: [f32;3],
-    pub _padding2: f32,
+    pub intensity: f32,
 }
 
 #[repr(C)]
@@ -59,7 +61,8 @@ pub struct DirectionalLightUniformData {
     pub color: [f32;3],
     pub _padding: f32,
     pub light_direction: [f32;3],
-    pub _padding2: f32,
+    pub intensity: f32,
+    pub view_projection: [[f32;4];4], // light view-projection matrix
 }
 
 impl DirectionalLight {
@@ -68,18 +71,39 @@ impl DirectionalLight {
             color: color,
             _padding: 1.0,
             light_direction: direction,
-            _padding2:1.0,
+            intensity:2.0,
         }
     }
 
     pub fn generate_directional_light_data(&self) -> DirectionalLightUniformData {
         let direction = self.light_direction;
         let color = self.color;
+        let light_dir: Vector3<f32> = cgmath::vec3(direction[0], direction[1], direction[2]).normalize();
+        let light_pos = light_dir * 50.0;
+        let light_view = cgmath::Matrix4::look_at_rh(
+            Point3 { 
+                x: light_pos.x, 
+                y: light_pos.y, 
+                z: light_pos.z }, 
+            Point3 { 
+                x: 0.0, 
+                y: 0.0, 
+                z: 0.0 }, 
+            Vector3::unit_y());
+        
+        let shadow_size = 20.0;
+        let light_projection = cgmath::ortho(
+            -shadow_size, shadow_size, 
+            -shadow_size, shadow_size, 
+            0.1, 100.0);
+        let light_view_projection = light_projection * light_view;
+
         DirectionalLightUniformData {
             color: color,
             _padding: 1.0,
             light_direction: direction,
-            _padding2: 1.0,
+            intensity: self.intensity,
+            view_projection: light_view_projection.into(),
         }
     }
 }
@@ -114,9 +138,11 @@ impl Light {
         let range = self.range;
         PointLightData {
             position: position.into(),
-            _padding: 0,
+            _padding:0,
             color: color,
-            range: range
+            range: range,
+            tangent_light_position: [0.0,0.0,0.0],
+            _padding2:0,
         }
     }
 }
@@ -146,7 +172,7 @@ pub struct MovableLightController {
 }
 
 impl MovableLightController {
-    pub fn new(speed: f32, sensitivity: f32) -> Self {
+    pub fn new(speed: f32, sensitivity: f32, light_range: f32, light_color: Vector3<f32>) -> Self {
         Self {
             amount_left: 0.0,
             amount_right: 0.0,
@@ -156,8 +182,8 @@ impl MovableLightController {
             amount_down: 0.0,
             speed,
             sensitivity,
-            range: 1.0,
-            light_color: Vector3::new(1.0, 1.0, 1.0)
+            range: light_range,
+            light_color: Vector3::new(light_color.x, light_color.y, light_color.z)
         }
     }
 
@@ -190,30 +216,32 @@ impl MovableLightController {
                 true
             }
             VirtualKeyCode::Equals => {
-                if state == ElementState::Pressed  && self.range > 0.1 {
+                if state == ElementState::Pressed  && self.range > 32.0 {
                     println!("Increasing Point Light Ranges");
-                    self.range = self.range - 0.2;
+                    self.range = self.range + 5.0;
                     //println!("{:?}", self.range);
                 }
                 true
             }
             VirtualKeyCode::Minus => {
-                if state == ElementState::Pressed && self.range < 500.0 {
+                if state == ElementState::Pressed && self.range < 12800.0 {
                     println!("Decreasing Point Light Ranges");
-                    self.range = self.range + 0.2;
+                    self.range = self.range - 5.0;
                     //println!("{:?}", self.range);
                 }
                 true
             }
             VirtualKeyCode::LBracket =>{
-                if state == ElementState::Pressed && self.light_color.x >0.1 {
-                    self.light_color -= [0.1,0.1,0.1].into();
+                if state == ElementState::Pressed && self.light_color.x >0.00001 {
+                    self.light_color -= [5.0,5.0,5.0].into();
+                    //println!("{:?}",self.light_color)
                 }
                 true
             }
             VirtualKeyCode::RBracket => {
-                if state == ElementState::Pressed && self.light_color.x <10.0 {
-                    self.light_color += [0.1,0.1,0.1].into();
+                if state == ElementState::Pressed && self.light_color.x <10000.0 {
+                    self.light_color += [5.0,5.0,5.0].into();
+                    //println!("{:?}",self.light_color)
                 }
                 true
             }

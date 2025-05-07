@@ -1,6 +1,6 @@
 #![allow(warnings)] 
 
-use std::{clone, vec};
+use std::{clone, default, ops::Deref, sync::{mpsc::{self, Receiver, Sender, SyncSender}, Arc, Mutex}, thread, vec};
 mod texture;
 mod model;
 mod resources;
@@ -9,13 +9,16 @@ mod light;
 mod deferredRenderPipeline;
 
 use bytemuck::Contiguous;
+use image::buffer;
+use instant::now;
 use light::{init_new_directional_lights_Uniform, init_new_point_lights_buffer, DirectionalLight, DirectionalLightUniformData, PointLightData};
-use model::{update_instance, Model, Vertex};
-use cgmath::{num_traits::ToPrimitive, perspective, prelude::*};
+use log::debug;
+use model::{update_instance_position_rotation, DrawModel, Instance, Model, Vertex};
+use cgmath::{num_traits::ToPrimitive, perspective, prelude::*, Vector3};
 use rand::Rng;
 use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use texture::Texture;
-use wgpu::util::DeviceExt;
+use wgpu::{util::DeviceExt, BindGroup, PipelineLayout, RenderPipeline, Sampler, ShaderModule, TextureView};
 use winit::{
     event::*,
     event_loop::{ControlFlow, EventLoop},
@@ -54,18 +57,23 @@ impl CameraUniform {
 }
 
 
-#[repr(C)]
-#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct LightUniform {
-    position: [f32; 3],
-    _padding: u32,
-    color: [f32; 3],
-    _padding2: u32,
-}
+// #[repr(C)]
+// #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+// struct LightUniform {
+//     position: [f32; 3],
+//     _padding: u32,
+//     color: [f32; 3],
+//     _padding2: u32,
+// }
 
 enum RenderOutputMode {
     Colored,
     Wireframe,
+}
+
+enum WindowMode{
+    Fullscreen,
+    Windowed,
 }
 
 struct State {
@@ -76,6 +84,7 @@ struct State {
     config: wgpu::SurfaceConfiguration,
     size: winit::dpi::PhysicalSize<u32>,
     window: Window,
+    window_mode: WindowMode,
     render_pipeline: wgpu::RenderPipeline,
     wireframe_pipeline: wgpu::RenderPipeline,
     camera: camera::Camera,
@@ -86,7 +95,8 @@ struct State {
     camera_bind_group: wgpu::BindGroup,
     // instances: Vec<Instance>,
     // instance_buffer: wgpu::Buffer,
-    depth_texture: Texture,
+    depth_texture: wgpu::Texture,
+    depth_view: TextureView,
     models : Vec<model::Model>,
     light_uniform: light::LightUniform,
     light_buffer: wgpu::Buffer,
@@ -96,6 +106,15 @@ struct State {
     directional_light: light::DirectionalLight,
     directional_light_uniform_data: light::DirectionalLightUniformData,
     directional_light_uniform: wgpu::Buffer,
+    shadow_texture_size: u32,
+    shadow_texture: wgpu::Texture,
+    shadow_texture_view: TextureView,
+    shadow_sampler: Sampler,
+    shadow_shader: ShaderModule,
+    shadow_bind_group: BindGroup,
+    shadow_pass_light_bind_group: BindGroup,
+    shadow_pipeline_layout: PipelineLayout,
+    shadow_pipeline: RenderPipeline,
     movable_light: light::Light,
     movable_light_controller: light::MovableLightController,
     mouse_pressed: bool,
@@ -141,8 +160,8 @@ fn create_render_pipeline(
             unclipped_depth: false,
             conservative: false,
         },
-        depth_stencil: depth_format.map(|format| wgpu::DepthStencilState {
-            format,
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
             depth_write_enabled: true,
             depth_compare: wgpu::CompareFunction::Less,
             stencil: wgpu::StencilState::default(),
@@ -200,8 +219,8 @@ fn create_wireframe_pipeline(
             unclipped_depth: false,
             conservative: false,
         },
-        depth_stencil: depth_format.map(|format| wgpu::DepthStencilState {
-            format,
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
             depth_write_enabled: true,
             depth_compare: wgpu::CompareFunction::Less,
             stencil: wgpu::StencilState::default(),
@@ -216,16 +235,18 @@ fn create_wireframe_pipeline(
     })
 }
 fn optional_features() -> wgpu::Features {
-        wgpu::Features::POLYGON_MODE_LINE
+        let mut f = wgpu::Features::POLYGON_MODE_LINE;
+        f.insert(wgpu::Features::VERTEX_WRITABLE_STORAGE);
+        //wgpu::Features::VERTEX_WRITABLE_STORAGE
+        f
     }
 
 impl State {
-    async fn new(window: Window, file_path: String, file_type:String, use_hdr: bool) -> Self {
+    async fn new(window: Window, file_path: String, file_type:String, use_hdr: bool, window_mode: WindowMode) -> Self {
         let free_cam = true;
         let size = window.inner_size();
-
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN,
+            backends: wgpu::Backends::DX12,
             dx12_shader_compiler: Default::default(),
         });
 
@@ -270,7 +291,7 @@ impl State {
             height: size.height,
             present_mode: wgpu::PresentMode::Immediate,//surface_caps.present_modes[2],
             alpha_mode: surface_caps.alpha_modes[0],
-            view_formats: vec![],
+            view_formats: vec![surface_format],
         };
         surface.configure(&device, &config);
 
@@ -357,45 +378,6 @@ impl State {
             label: Some("camera_bind_group"),
         });
 
-        let shadow_depth_texture_size = 1024;
-        let shadow_depth_texture_size_extent3d = wgpu::Extent3d{
-            width: shadow_depth_texture_size,
-            height: shadow_depth_texture_size,
-            depth_or_array_layers:1,
-        };
-        let shadow_depth_texture =  device.create_texture(
-            &wgpu::TextureDescriptor{
-                label: Some("shadow depth texture"),
-                size: shadow_depth_texture_size_extent3d,
-                mip_level_count:1,
-                sample_count:1,
-                dimension:wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Depth32Float,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            }
-        );
-        let shadow_depth_texture_view = shadow_depth_texture.create_view(
-            &wgpu::TextureViewDescriptor::default()
-        );
-        
-        //let smp_vertex_buffer = wgpu::VertexBufferLayout
-
-        let shadow_depth_uniform_buffer_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor{
-            entries: &[
-                wgpu::BindGroupLayoutEntry{
-                    binding:0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer { 
-                        ty: wgpu::BufferBindingType::Uniform, 
-                        has_dynamic_offset: false, 
-                        min_binding_size: None 
-                    },
-                    count: None,
-                }
-            ],
-            label: None
-        });
 
         // let smp_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { 
         //     label: None, 
@@ -403,18 +385,20 @@ impl State {
         //         wgpu::nomd
         //     ],
         // });
-
+        let m_pos = [0.0,100.0,0.0];
+        let m_color = [20.0,20.0,20.0];
+        let m_range = 256.0;
 
         let light_uniform = light::LightUniform {
-            position: [0.0, 300.0, 0.0],
+            position: m_pos,
             _padding: 0,
-            color: [1.0, 1.0, 1.0],
-            range: 1.0,
+            color: m_color,
+            range: m_range,
         };
 
-        let movable_light = light::Light::new([0.0, 300.0, 0.0], cgmath::Deg(-90.0),[0.01,0.01,0.01], 0.05);
+        let movable_light = light::Light::new(m_pos, cgmath::Deg(-90.0),m_color, m_range);
 
-        let movable_light_controller = light::MovableLightController::new(300.0, 1.0);
+        let movable_light_controller = light::MovableLightController::new(300.0, 1.0, m_range, m_color.into());
 
         let light_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Light VB"),
@@ -427,24 +411,62 @@ impl State {
         //for spawning multiple point light
         let light_num = 1;
         for i in 0..light_num {
+            if i == 1 {
+                let mut new_light = light::Light::new([99999.0,999999.0,99999.0], cgmath::Deg(-90.0), [0.0, 0.0, 0.0], 0.0);
+                point_light.push(new_light);
+                let new_light_data = point_light[i].generate_point_light_data();
+                point_light_data.push(new_light_data);
+            } else {
+                let color_r = 0.1;
+                let mut rng = rand::rng();
+                let random_pos = [
+                    rng.random_range(-1000.0..1000.0).to_f32().unwrap(), 
+                    rng.random_range(10.0..15.0).to_f32().unwrap(), 
+                    rng.random_range(-1000.0..1000.0).to_f32().unwrap()
+                    ];
+                let mut new_light = light::Light::new(random_pos, cgmath::Deg(-90.0), [10.0, 0.0, 0.0], 256.0);
+                
+                point_light.push(new_light);
+                let new_light_data = point_light[i].generate_point_light_data();
+                point_light_data.push(new_light_data);
+            }
+            
+        }
+        if light_num >= 50 {
+            for i in 0..light_num {
             let color_r = 0.1;
             let mut rng = rand::rng();
-            let random_r = rng.random_range(0.0..1.0).to_f32().unwrap();
-            let random_g = rng.random_range(0.0..1.0).to_f32().unwrap();
-            let random_b = rng.random_range(0.0..1.0).to_f32().unwrap();
             let random_pos = [
-                rng.random_range(-1500.0..1500.0).to_f32().unwrap(), 
-                rng.random_range(0.0..55.0).to_f32().unwrap(), 
-                rng.random_range(-1500.0..1500.0).to_f32().unwrap()
+                rng.random_range(-1000.0..1000.0).to_f32().unwrap(), 
+                rng.random_range(10.0..15.0).to_f32().unwrap(), 
+                rng.random_range(-1000.0..1000.0).to_f32().unwrap()
                 ];
-            let new_light = light::Light::new(random_pos, cgmath::Deg(-90.0), [0.01,0.01,0.01], 0.01);
+            let mut new_light = light::Light::new(random_pos, cgmath::Deg(-90.0), [0.0, 10.0, 0.0], 256.0);
+            
             point_light.push(new_light);
-            let new_light_data = point_light[i].generate_point_light_data();
+            let new_light_data = point_light[i+50].generate_point_light_data();
             point_light_data.push(new_light_data);
+            }
+            for i in 0..light_num {
+            let color_r = 0.1;
+            let mut rng = rand::rng();
+            let random_pos = [
+                rng.random_range(-1000.0..1000.0).to_f32().unwrap(), 
+                rng.random_range(10.0..15.0).to_f32().unwrap(), 
+                rng.random_range(-1000.0..1000.0).to_f32().unwrap()
+                ];
+            let mut new_light = light::Light::new(random_pos, cgmath::Deg(-90.0), [0.0, 0.0, 10.0], 256.0);
+            
+            point_light.push(new_light);
+            let new_light_data = point_light[i+100].generate_point_light_data();
+            point_light_data.push(new_light_data);
+            }
         }
+        
+        
         let point_light_buffer = init_new_point_lights_buffer(point_light_data, &device);
 
-        let directional_light = light::DirectionalLight::new([0.2, -1.0, -0.3], [1.0,1.0,1.0]);
+        let directional_light = light::DirectionalLight::new([0.0, 1.0, -10.0], [1.0,1.0,1.0]);
 
         
         let directional_light_uniform = directional_light.generate_directional_light_data();
@@ -511,42 +533,22 @@ impl State {
             label: None,
         });
 
-        // const NUM_INSTANCES_PER_ROW: u32 = 1;
+        let depth_texture = device.create_texture(&wgpu::TextureDescriptor{
+            label: Some("Scene Depth Texture"),
+            size: wgpu::Extent3d{
+                width: size.width,
+                height: size.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format:wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
 
-        // const SPACE_BETWEEN: f32 = 3.0;
-
-        // let instances = (0..NUM_INSTANCES_PER_ROW)
-        //     .flat_map(|z| {
-        //         (0..NUM_INSTANCES_PER_ROW).map(move |x| {
-        //             let x = SPACE_BETWEEN * (x as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
-        //             let z = SPACE_BETWEEN * (z as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
-
-        //             let position = cgmath::Vector3 { x, y: 0.0, z };
-
-        //             let rotation = if position.is_zero() {
-        //                 cgmath::Quaternion::from_axis_angle(
-        //                     cgmath::Vector3::unit_z(),
-        //                     cgmath::Deg(0.0),
-        //                 )
-        //             } else {
-        //                 cgmath::Quaternion::from_axis_angle(position.normalize(), cgmath::Deg(0.0))
-        //             };
-
-        //             Instance { position, rotation }
-        //         })
-        //     })
-        //     .collect::<Vec<_>>();
-        // let instance_data = instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
-
-        // let instance_buffer = device.create_buffer_init(
-        //     &wgpu::util::BufferInitDescriptor {
-        //         label: Some("Instance Buffer"),
-        //         contents: bytemuck::cast_slice(&instance_data),
-        //         usage: wgpu::BufferUsages::VERTEX,
-        //     }
-        // );
-
-        let depth_texture = texture::Texture::create_depth_texture(&device, &config, "depth_texture");
+        let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         //to do
         let useDeferredRenderer = false;
@@ -556,55 +558,183 @@ impl State {
         } else {
             
         }
+        
+        let shadow_texture_size = 2048;
+        let shadow_texture_size_extent3d = wgpu::Extent3d{
+            width: shadow_texture_size,
+            height: shadow_texture_size,
+            depth_or_array_layers:1,
+        };
+        let shadow_texture =  device.create_texture(
+            &wgpu::TextureDescriptor{
+                label: Some("shadow map texture"),
+                size: shadow_texture_size_extent3d,
+                mip_level_count:1,
+                sample_count:1,
+                dimension:wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Depth32Float,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            }
+        );
+        let shadow_texture_view = shadow_texture.create_view(
+            &wgpu::TextureViewDescriptor::default()
+        );
 
-        let shadow_depth_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor{
-            label:None,
+        //pcf filtering
+        let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor{
+            label: Some("Shadow Sampler"),
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        
+        let shadow_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor{
+            label:Some("Shadow Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shadow.wgsl").into()),
+        });
+
+        let shadow_pass_light_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::VERTEX ,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: (true) },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::VERTEX ,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }
+            ],
+            label: None,
+        });
+
+        let shadow_pass_light_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &shadow_pass_light_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                binding: 0,
+                resource: light_buffer.as_entire_binding(),
+            },
+                wgpu::BindGroupEntry{
+                binding:1,
+                resource: point_light_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry{
+                binding:2,
+                resource: directional_light_buffer.as_entire_binding(),
+            }
+            ],
+            label: None,
+        });
+
+        let shadow_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor{
+            label: Some("shadow bind group layout"),
+            entries: &[
+                //shadow map
+                wgpu::BindGroupLayoutEntry{
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture { 
+                        sample_type: wgpu::TextureSampleType::Depth, 
+                        view_dimension: wgpu::TextureViewDimension::D2, 
+                        multisampled: false,
+                    },
+                    count:None,
+                },
+                //shadow sampler
+                wgpu::BindGroupLayoutEntry{
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count:None,
+                },
+            ],
+        });
+
+        let shadow_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor{
+            label: Some("Shadow Bind Goup"),
+            layout: &shadow_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry{
+                    binding:0,
+                    resource: wgpu::BindingResource::TextureView(&shadow_texture_view),
+                },
+                wgpu::BindGroupEntry{
+                    binding:1,
+                    resource: wgpu::BindingResource::Sampler(&shadow_sampler),
+                },
+            ],
+        });
+
+        let shadow_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor{
+            label: Some("Shadow Pipeline Layout"),
             bind_group_layouts: &[
-                &shadow_depth_uniform_buffer_bind_group_layout,
-                &camera_bind_group_layout,
+                &shadow_pass_light_bind_group_layout,
             ],
             push_constant_ranges: &[],
         });
 
-        // let shadow_depth_render_pipeline = {
-        //     let shader_module_desc = wgpu::ShaderModuleDescriptor{
-        //         label: None,
-        //         source: wgpu::ShaderSource::Wgsl(include_str!("vertexShadow.wgsl").into()),
-        //     };
-        //     let shader = device.create_shader_module(shader_module_desc);
-        //     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor{
-        //         label: None,
-        //         layout: Some(&shadow_depth_pipeline_layout),
-        //         vertex: wgpu::VertexState {
-        //             module: &shader,
-        //             entry_point: "vs_main",
-        //             buffers: &[model::ModelVertex::desc(), model::InstanceRaw::desc()],
-        //         },
-        //         fragment: None,
-        //         primitive: wgpu::PrimitiveState {
-        //             topology: wgpu::PrimitiveTopology::TriangleList,
-        //             strip_index_format: None,
-        //             front_face: wgpu::FrontFace::Ccw,
-        //             cull_mode: Some(wgpu::Face::Back),
-        //             polygon_mode: wgpu::PolygonMode::Fill,
-        //             unclipped_depth: false,
-        //             conservative: false,
-        //         },
-        //         depth_stencil: Some(texture::Texture::DEPTH_FORMAT).map(|format| wgpu::DepthStencilState{
-        //             format,
-        //             depth_write_enabled: true,
-        //             depth_compare: wgpu::CompareFunction::Less,
-        //             stencil: wgpu::StencilState::default(),
-        //             bias: wgpu::DepthBiasState::default(),
-        //         }),
-        //         multisample: wgpu::MultisampleState {
-        //             count: 1,
-        //             mask: !0,
-        //             alpha_to_coverage_enabled: false,
-        //         },
-        //         multiview: None,
-        //     })
-        // };
+        let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor{
+            label: Some("Shadow Pipeline"),
+            layout: Some(&shadow_pipeline_layout),
+            vertex: wgpu::VertexState{
+                module: &shadow_shader,
+                entry_point: "vs_main",
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x3,
+                        offset: 0,
+                        shader_location: 0,
+                    }],
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shadow_shader,
+                entry_point: "fs_main",
+                targets: &[], // No color targets
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState{
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState{
+                    constant: 2,
+                    slope_scale: 2.0,
+                    clamp: 0.0,
+                },
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+
+        
 
         let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Render Pipeline Layout"),
@@ -612,14 +742,20 @@ impl State {
                 &texture_bind_group_layout,
                 &camera_bind_group_layout,
                 &light_bind_group_layout,
+                &shadow_bind_group_layout,
             ],
             push_constant_ranges: &[],
         });
-
+        let mut shaders: &str;
+        match config.format{
+            TextureFormat::Rgba16Float => {shaders = include_str!("shader_hdr.wgsl").into()}
+            TextureFormat::Rgba8UnormSrgb => {shaders = include_str!("shader.wgsl").into()}
+            _ => {shaders = include_str!("shader.wgsl").into()}
+        }
         let render_pipeline = {
             let shader = wgpu::ShaderModuleDescriptor {
                 label: Some("Normal Shader"),
-                source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+                source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(shaders)),
             };
 
             create_render_pipeline(&device, 
@@ -645,21 +781,6 @@ impl State {
                 shader)
         };
 
-        // let depth_texture_texture = device.create_texture(&wgpu::TextureDescriptor{
-        //     label: Some("depth texture"),
-        //     size: wgpu::Extent3d { 
-        //         width: config.width, 
-        //         height: config.height, 
-        //         depth_or_array_layers: 1, 
-        //     },
-        //     mip_level_count:1,
-        //     sample_count:1,
-        //     dimension: wgpu::TextureDimension::D2,
-        //     format: wgpu::TextureFormat::Depth24PlusStencil8,
-        //     usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        //     view_formats: &[],
-        // });
-
         
 
 
@@ -678,18 +799,19 @@ impl State {
         models.push(obj_model);
         //movable_model_counts +=1;
         let mut rng = rand::rng();
+        let instances_num = 10;
         for i in 1..=0 {
         let test_mesh = resources::load_model("default_cube.obj",
                 "opengl".to_string(), 
                 &device, &queue, &texture_bind_group_layout,
-                5,cgmath::Vector3 { x: (rng.random_range(-1500.0..1500.0) as f32),
+                instances_num,cgmath::Vector3 { x: (rng.random_range(-1500.0..1500.0) as f32),
                 y: (rng.random_range(30.0..100.0)  as f32), z: (rng.random_range(-1500.0..1500.0)  as f32) }).await.unwrap();
 
         models.push(test_mesh); 
         println!("pushed : {i}");
         movable_model_counts +=1;
         } 
-        println!("total movable model/object : {movable_model_counts}");
+        println!("total movable model/object : {:?}",movable_model_counts*instances_num);
         
         let mut render_output_mode = RenderOutputMode::Colored;
 
@@ -697,6 +819,7 @@ impl State {
         Self {
             free_cam,
             window,
+            window_mode,
             surface,
             device,
             queue,
@@ -711,6 +834,7 @@ impl State {
             camera_buffer,
             camera_bind_group,
             depth_texture,
+            depth_view,
             models,
             point_light,
             point_light_buffer,
@@ -720,6 +844,15 @@ impl State {
             light_uniform,
             light_buffer,
             light_bind_group,
+            shadow_texture_size,
+            shadow_texture,
+            shadow_texture_view,
+            shadow_sampler,
+            shadow_shader,
+            shadow_bind_group,
+            shadow_pass_light_bind_group,
+            shadow_pipeline_layout,
+            shadow_pipeline,
             mouse_pressed: false,
             //single point light to be removed after implementing movable light controller with ability to control each light in Vec<Light>
             movable_light,
@@ -742,8 +875,21 @@ impl State {
             self.config.height = new_size.height;
             self.projection.resize(new_size.width, new_size.height);
             self.surface.configure(&self.device, &self.config);
-            self.depth_texture = texture::Texture::create_depth_texture(&self.device, &self.config, "depth_texture");
-            
+            self.depth_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Scene Depth Texture"),
+                size: wgpu::Extent3d {
+                    width: self.size.width, // Same as HDR render target
+                    height: self.size.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Depth32Float, // Common depth format
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            self.depth_view = self.depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
         }
     }
 
@@ -766,6 +912,20 @@ impl State {
                             RenderOutputMode::Colored => {self.render_output_mode = RenderOutputMode::Wireframe; true}
                             RenderOutputMode::Wireframe => {self.render_output_mode = RenderOutputMode::Colored; true}
                         } 
+                    } else if *key == VirtualKeyCode::F11 && *state == ElementState::Released {
+                        println!("updating window mode");
+                        match self.window_mode {
+                            WindowMode::Fullscreen => {
+                                self.window.set_fullscreen(None);
+                                self.window_mode = WindowMode::Windowed;
+                                true
+                            }
+                            WindowMode::Windowed => {
+                                self.window.set_fullscreen(Some(Fullscreen::Borderless(None)));
+                                self.window_mode = WindowMode::Fullscreen;
+                                true
+                            }
+                        }
                     } else {
                         false
                     }
@@ -791,24 +951,305 @@ impl State {
         
         
         
-        // use rayon::prelude::*;
+        use rayon::prelude::*;
 
-        // if self.models.len() > 1{
-        //     ///// test moving models, will be ignored when model len() !>1 ///
-        //     let newpos = (1..self.models.len()).into_par_iter().map(|i| model::test_move_model_vec3(self.models[i].instances[0].position , dt)).collect::<Vec<_>>();
-        //     for i in 1..self.models.len(){
-        //         self.models[i].instances[0].position = newpos[i-1]
-        //     }
-
-        //     for i in 0..self.models.len(){
-        //         if i != 0{
-        //             self.models[i].instances = update_instance(self.models[i].instance_num, self.models[i].instances[0].position);
-        //             let instance_data = self.models[i].instances.par_iter().map(model::Instance::to_raw).collect::<Vec<_>>();
-        //             self.queue.write_buffer(&self.models[i].instance_buffer, 0, bytemuck::cast_slice(&instance_data)); 
-        //     }
+        if self.models.len() > 1{
+            ///// test moving models, will be ignored when model len() !>1 ///
+            debug!("chunking model update()");
+            let chunk_size_f = self.models.len().to_f32().unwrap()/8.0;
+            let chunk_size = chunk_size_f.ceil().to_usize().unwrap();
+            let model_chunks = self.models
+                .par_chunks(chunk_size)
+                .collect::<Vec<_>>();
+            let model_chunk_0: &[Model] = model_chunks.get(0).unwrap();
+            let model_chunk_1: Option<&[Model]>  = model_chunks.get(1).map(|v| &**v);
+            let model_chunk_2: Option<&[Model]>  = model_chunks.get(2).map(|v| &**v);
+            let model_chunk_3: Option<&[Model]>  = model_chunks.get(3).map(|v| &**v);
+            let model_chunk_4: Option<&[Model]>  = model_chunks.get(4).map(|v| &**v);
+            let model_chunk_5: Option<&[Model]>  = model_chunks.get(5).map(|v| &**v);
+            let model_chunk_6: Option<&[Model]>  = model_chunks.get(6).map(|v| &**v);
+            let model_chunk_7: Option<&[Model]>  = model_chunks.get(7).map(|v| &**v);
+            let mut modelpos_chunk_0: Vec<Vector3<f32>> = vec![];
+            let mut modelpos_chunk_1: Vec<Vector3<f32>> = vec![];
+            let mut modelpos_chunk_2: Vec<Vector3<f32>> = vec![];
+            let mut modelpos_chunk_3: Vec<Vector3<f32>> = vec![];
+            let mut modelpos_chunk_4: Vec<Vector3<f32>> = vec![];
+            let mut modelpos_chunk_5: Vec<Vector3<f32>> = vec![];
+            let mut modelpos_chunk_6: Vec<Vector3<f32>> = vec![];
+            let mut modelpos_chunk_7: Vec<Vector3<f32>> = vec![];
+            debug!("chunking position of models");
+            if !model_chunk_0.is_empty(){
+                
+                for model in model_chunk_0{
+                    for k in &model.instances{
+                        modelpos_chunk_0.push(k.position);
+                    }
+                
+                }
+            }
+            match model_chunk_1{
+                Some(models) => {
+                    for model in models{
+                        for k in &model.instances{
+                            modelpos_chunk_1.push(k.position);
+                        }
+                    }
+                }
+                None => {} 
+            }
+            match model_chunk_2{
+                Some(models) => {
+                    for model in models{
+                        for k in &model.instances{
+                            modelpos_chunk_2.push(k.position);
+                        }
+                    }
+                }
+                None => {} 
+            }
+            match model_chunk_3{
+                Some(models) => {
+                    for model in models{
+                        for k in &model.instances{
+                            modelpos_chunk_3.push(k.position);
+                        }
+                    }
+                }
+                None => {} 
+            }
+            match model_chunk_4{
+                Some(models) => {
+                    for model in models{
+                        for k in &model.instances{
+                            modelpos_chunk_4.push(k.position);
+                        }
+                    }
+                }
+                None => {} 
+            }
+            match model_chunk_5{
+                Some(models) => {
+                    for model in models{
+                        for k in &model.instances{
+                            modelpos_chunk_5.push(k.position);
+                        }
+                    }
+                }
+                None => {} 
+            }
+            match model_chunk_6{
+                Some(models) => {
+                    for model in models{
+                        for k in &model.instances{
+                            modelpos_chunk_6.push(k.position);
+                        }
+                    }
+                }
+                None => {} 
+            }
+            match model_chunk_7{
+                Some(models) => {
+                    for model in models{
+                        for k in &model.instances{
+                            modelpos_chunk_7.push(k.position);
+                        }
+                    }
+                }
+                None => {} 
+            }
             
-        // }
-        // }
+            debug!("generating channels");
+            let mut pos: Arc<Mutex<Vec<Vector3<f32>>>>= Arc::new(Mutex::new(vec![]));
+            let (tx_0 ,rx_0): (SyncSender<Vec<Vector3<f32>>>, Receiver<Vec<Vector3<f32>>> ) = mpsc::sync_channel(1);
+            let (tx_1 ,rx_1): (SyncSender<Vec<Vector3<f32>>>, Receiver<Vec<Vector3<f32>>> ) = mpsc::sync_channel(1);
+            let (tx_2 ,rx_2): (SyncSender<Vec<Vector3<f32>>>, Receiver<Vec<Vector3<f32>>> ) = mpsc::sync_channel(1);
+            let (tx_3 ,rx_3): (SyncSender<Vec<Vector3<f32>>>, Receiver<Vec<Vector3<f32>>> ) = mpsc::sync_channel(1);
+            let (tx_4 ,rx_4): (SyncSender<Vec<Vector3<f32>>>, Receiver<Vec<Vector3<f32>>> ) = mpsc::sync_channel(1);
+            let (tx_5 ,rx_5): (SyncSender<Vec<Vector3<f32>>>, Receiver<Vec<Vector3<f32>>> ) = mpsc::sync_channel(1);
+            let (tx_6 ,rx_6): (SyncSender<Vec<Vector3<f32>>>, Receiver<Vec<Vector3<f32>>> ) = mpsc::sync_channel(1);
+            let (tx_7 ,rx_7): (SyncSender<Vec<Vector3<f32>>>, Receiver<Vec<Vector3<f32>>> ) = mpsc::sync_channel(1);
+            debug!("spawning t_0");
+            let t_0 = std::thread::spawn(move || {
+                let mut l_pos: Vec<Vector3<f32>> = vec![];
+                for i in 0..modelpos_chunk_0.len(){
+                    l_pos.push(model::test_move_model_vec3(modelpos_chunk_0[i], dt));
+                }
+                let mut sent = false;
+                while !sent {
+                    debug!("sending new pos : pos len() = {:?}", l_pos.len());
+                    let res =tx_0.send(l_pos.clone());
+                    match res {
+                        Ok(_) => {sent = true}
+                        Err(err) => {println!("{:?}",err); sent = false}
+                    }
+                }
+            });
+            debug!("spawning t_1");
+            let t_1 = std::thread::spawn(move || {
+                let mut l_pos: Vec<Vector3<f32>> = vec![];
+                for i in 0..modelpos_chunk_1.len(){
+                    l_pos.push(model::test_move_model_vec3(modelpos_chunk_1[i], dt));
+                }
+                let mut sent = false;
+                while !sent {
+                    debug!("sending new pos : pos len() = {:?}", l_pos.len());
+                    let res = tx_1.send(l_pos.clone());
+                    match res {
+                        Ok(_) => {sent = true}
+                        Err(err) => {println!("{:?}",err); sent = false}
+                    }
+                }
+            });
+            debug!("spawning t_2");
+            let t_2 = std::thread::spawn(move || {
+                let mut l_pos: Vec<Vector3<f32>> = vec![];
+                for i in 0..modelpos_chunk_2.len(){
+                    l_pos.push(model::test_move_model_vec3(modelpos_chunk_2[i], dt));
+                }
+                let mut sent = false;
+                while !sent {
+                    debug!("sending new pos : pos len() = {:?}", l_pos.len());
+                    let res = tx_2.send(l_pos.clone());
+                    match res {
+                        Ok(_) => {sent = true}
+                        Err(err) => {println!("{:?}",err); sent = false}
+                    }
+                }
+            });
+            debug!("spawning t_3");
+            let t_3 = std::thread::spawn(move || {
+                let mut l_pos: Vec<Vector3<f32>> = vec![];
+                for i in 0..modelpos_chunk_3.len(){
+                    l_pos.push(model::test_move_model_vec3(modelpos_chunk_3[i], dt));
+                }
+                let mut sent = false;
+                while !sent {
+                    debug!("sending new pos : pos len() = {:?}", l_pos.len());
+                    let res = tx_3.send(l_pos.clone());
+                    match res {
+                        Ok(_) => {sent = true}
+                        Err(err) => {println!("{:?}",err); sent = false}
+                    }
+                }
+            });
+            debug!("spawning t_6");
+            let t_4 = std::thread::spawn(move || {
+                let mut l_pos: Vec<Vector3<f32>> = vec![];
+                for i in 0..modelpos_chunk_4.len(){
+                    l_pos.push(model::test_move_model_vec3(modelpos_chunk_4[i], dt));
+                }
+                let mut sent = false;
+                while !sent {
+                    debug!("sending new pos : pos len() = {:?}", l_pos.len());
+                    let res = tx_4.send(l_pos.clone());
+                    match res {
+                        Ok(_) => {sent = true}
+                        Err(err) => {println!("{:?}",err); sent = false}
+                    }
+                }
+            });
+            debug!("spawning t_6");
+            let t_5 = std::thread::spawn(move || {
+                let mut l_pos: Vec<Vector3<f32>> = vec![];
+                for i in 0..modelpos_chunk_5.len(){
+                    l_pos.push(model::test_move_model_vec3(modelpos_chunk_5[i], dt));
+                }
+                let mut sent = false;
+                while !sent {
+                    debug!("sending new pos : pos len() = {:?}", l_pos.len());
+                    let res = tx_5.send(l_pos.clone());
+                    match res {
+                        Ok(_) => {sent = true}
+                        Err(err) => {println!("{:?}",err); sent = false}
+                    }
+                }
+            });
+            debug!("spawning t_6");
+            let t_6 = std::thread::spawn(move || {
+                let mut l_pos: Vec<Vector3<f32>> = vec![];
+                for i in 0..modelpos_chunk_6.len(){
+                    l_pos.push(model::test_move_model_vec3(modelpos_chunk_6[i], dt));
+                }
+                let mut sent = false;
+                while !sent {
+                    debug!("sending new pos : pos len() = {:?}", l_pos.len());
+                    let res = tx_6.send(l_pos.clone());
+                    match res {
+                        Ok(_) => {sent = true}
+                        Err(err) => {println!("{:?}",err); sent = false}
+                    }
+                }
+            });
+            debug!("spawning t_7");
+            let t_7 = std::thread::spawn(move || {
+                let mut l_pos: Vec<Vector3<f32>> = vec![];
+                for i in 0..modelpos_chunk_7.len(){
+                    l_pos.push(model::test_move_model_vec3(modelpos_chunk_7[i], dt));
+                }
+                let mut sent = false;
+                while !sent {
+                    debug!("sending new pos : pos len() = {:?}", l_pos.len());
+                    let res = tx_7.send(l_pos.clone());
+                    match res {
+                        Ok(_) => {sent = true}
+                        Err(err) => {println!("{:?}",err); sent = false}
+                    }
+                }
+            });
+            
+            match &mut pos.lock(){
+                Ok(g) => {
+                    g.append(&mut rx_0.recv().unwrap());
+                    g.append(&mut rx_1.recv().unwrap());
+                    g.append(&mut rx_2.recv().unwrap());
+                    g.append(&mut rx_3.recv().unwrap());
+                    g.append(&mut rx_4.recv().unwrap());
+                    g.append(&mut rx_5.recv().unwrap());
+                    g.append(&mut rx_6.recv().unwrap());
+                    g.append(&mut rx_7.recv().unwrap());
+                }
+                Err(err) => {println!("{err}")}
+            }
+            
+            // model_chunks.into_par_iter().for_each(|models|{
+            //     let mut chunk_pos = (0..models.len())
+            //         .into_iter()
+            //         .map(|i| model::test_move_model_vec3(models[i].instances[0].position , dt)).collect::<Vec<_>>();
+            //     pos.lock().unwrap().append(&mut chunk_pos);
+            // });
+
+
+            // for models in model_chunks{
+            //     let mut chunk_pos = (0..models.len())
+            //         .into_iter()
+            //         .map(|i| model::test_move_model_vec3(models[i].instances[0].position , dt)).collect::<Vec<_>>();
+            //     pos.append(&mut chunk_pos);
+            // }
+            //let newpos: Vec<Vector3<f32>> = (1..self.models.len()).into_par_iter().map(|i| model::test_move_model_vec3(self.models[i].instances[0].position , dt)).collect::<Vec<_>>();
+            let mut newpos: Vec<Vector3<f32>> = vec![];
+            newpos = pos.as_ref().lock().unwrap().clone();
+            debug!("self.models.len() : {:?}", self.models.len());
+            debug!("newpos.len() : {:?}", newpos.len());
+            debug!("pos.len() : {:?}", pos.lock().unwrap().len());
+            // for i in 0..self.models.len(){
+            //     self.models[i].instances[0].position = newpos[i]
+            // }
+            let mut count = 0;
+            for i in 0..self.models.len(){
+                    for j in 0..self.models[i].instances.len(){
+                        self.models[i].instances[j].position = newpos[count];
+                        count += 1;
+                    }
+                }
+
+            for i in 0..self.models.len(){
+                if i != 0{
+                    let instance_data = self.models[i].instances.iter().map(model::Instance::to_raw).collect::<Vec<_>>();
+                    self.queue.write_buffer(&self.models[i].instance_buffer, 0, bytemuck::cast_slice(&instance_data)); 
+                }
+            
+            }
+        }
 
         
         /////////
@@ -824,14 +1265,44 @@ impl State {
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
         let output = self.surface.get_current_texture()?;
 
-        let view = output.texture.create_view(&wgpu:: TextureViewDescriptor::default());
+        let view = output.texture.create_view(&wgpu:: TextureViewDescriptor{format: Some(self.config.format),  ..Default::default()});
 
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Render Encoder"),
         });
 
         {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let mut shadow_pass = Arc::new(Mutex::new(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Shadow Pass"),
+                color_attachments: &[], // No color output
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.shadow_texture_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0), // Clear to max depth
+                        store: true,
+                    }),
+                    stencil_ops: None,
+                }),
+            })));
+            shadow_pass.lock().unwrap().set_pipeline(&self.shadow_pipeline);
+            shadow_pass.lock().unwrap().set_bind_group(0, &self.shadow_pass_light_bind_group, &[]);
+            &self.models.par_iter().for_each(|model|{
+                let vb =model.instance_buffer.slice(..);
+                let mut locked_sp = shadow_pass.lock().unwrap();
+                locked_sp.set_vertex_buffer(1, vb );
+                for mesh in &model.meshes{
+                    locked_sp.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                    locked_sp.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    locked_sp.set_bind_group(0, &self.shadow_pass_light_bind_group, &[]);
+                    locked_sp.draw_indexed(0..mesh.num_elements, 0, (0..model.instances.len() as u32).clone());
+                }
+                
+                //locked_sp.draw_model_instanced(model, 0..model.instances.len() as u32, &self.camera_bind_group, &self.shadow_pass_light_bind_group);
+            });
+        }
+
+        {
+            let mut render_pass = Arc::new(Mutex::new(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
@@ -847,14 +1318,14 @@ impl State {
                     },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_texture.view,
+                    view: &self.depth_view,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(1.0),
                         store: true,
                     }),
                     stencil_ops: None,
                 }),
-            });
+            })));
 
             //render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
 
@@ -862,27 +1333,42 @@ impl State {
             match self.render_output_mode {
                 RenderOutputMode::Colored => {
                     //println!("rendering Colored");
-                    render_pass.set_pipeline(&self.render_pipeline);
-                    for model in &self.models {
-                        render_pass.set_vertex_buffer(1, model.instance_buffer.slice(..) );
-                        render_pass.draw_model_instanced(model, 0..model.instances.len() as u32, &self.camera_bind_group, &self.light_bind_group)
-                    }
+                    render_pass.lock().unwrap().set_pipeline(&self.render_pipeline);
+                    &self.models.par_iter().for_each(|model|{
+                        let vb =model.instance_buffer.slice(..);
+                        let mut locked_rp = render_pass.lock().unwrap();
+                        locked_rp.set_vertex_buffer(1, vb );
+
+                        locked_rp.draw_model_instanced(model, 0..model.instances.len() as u32, &self.camera_bind_group, &self.light_bind_group, &self.shadow_bind_group);
+                    });
+                    // for model in &self.models {
+                    //     render_pass.lock().unwrap().set_vertex_buffer(1, model.instance_buffer.slice(..) );
+                    //     render_pass.lock().unwrap().draw_model_instanced(model, 0..model.instances.len() as u32, &self.camera_bind_group, &self.light_bind_group)
+                    // }
                 }
                 RenderOutputMode::Wireframe => {
-                    render_pass.set_pipeline(&self.wireframe_pipeline);
+                    render_pass.lock().unwrap().set_pipeline(&self.wireframe_pipeline);
+                    render_pass.lock().unwrap().set_bind_group(0, &self.light_bind_group, &[]);
                     //println!("rendering Wireframe");
-                    for model in &self.models{
-                        render_pass.set_vertex_buffer(1, model.instance_buffer.slice(..) );
+                    &self.models.par_iter().for_each(|model|{
+                        let vb =model.instance_buffer.slice(..);
+                        let mut locked_rp = render_pass.lock().unwrap();
+                        locked_rp.set_vertex_buffer(1, vb );
+                        locked_rp.draw_model_instanced(model, 0..model.instances.len() as u32, &self.camera_bind_group, &self.light_bind_group, &self.shadow_bind_group);
+                    });
+                    // for model in &self.models{
+                    //     render_pass.lock().unwrap().set_vertex_buffer(1, model.instance_buffer.slice(..) );
 
-                        render_pass.draw_model_instanced(model, 0..model.instances.len() as u32, &self.camera_bind_group, &self.light_bind_group);
-                    }
+                    //     render_pass.lock().unwrap().draw_model_instanced(model, 0..model.instances.len() as u32, &self.camera_bind_group, &self.light_bind_group);
+                    // }
                 }
             }
         }
 
+        
+        
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
-
         Ok(())
     }
 
@@ -896,9 +1382,10 @@ pub async fn run(file_path: String, file_type:String, fullscreen_mode: String, u
     let event_loop = EventLoop::new();
     let window_size: PhysicalSize<u32> = PhysicalSize { width: 1440, height: 1080 };
     let window = WindowBuilder::new().with_inner_size(window_size).build(&event_loop).unwrap();
-
+    let mut window_mode = WindowMode::Windowed;
     match fullscreen_mode.as_str() {
-        "fullscreen" => {
+        "fullscreen" => {   
+                            window_mode = WindowMode::Fullscreen;
                             println!("fullscreen mode");
                             let mut monitor = event_loop
                                 .available_monitors()
@@ -918,7 +1405,7 @@ pub async fn run(file_path: String, file_type:String, fullscreen_mode: String, u
     
 
     
-    let mut state = State::new(window, file_path, file_type, use_hdr).await;
+    let mut state = State::new(window, file_path, file_type, use_hdr, window_mode).await;
     let mut last_render_time = instant::Instant::now();
 
     event_loop.run(move | event, _, control_flow | {*control_flow = ControlFlow::Poll; match event {

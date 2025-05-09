@@ -78,24 +78,23 @@ impl DirectionalLight {
     pub fn generate_directional_light_data(&self) -> DirectionalLightUniformData {
         let direction = self.light_direction;
         let color = self.color;
-        let light_dir: Vector3<f32> = cgmath::vec3(direction[0], direction[1], direction[2]).normalize();
-        let light_pos = light_dir * 50.0;
+        println!("light direction : {:?}", direction);
+        let light_dir = Point3::new(direction[0], direction[1], direction[2]);
+        let light_pos = Point3::new(0.0, 0.0, 0.0);
+        let light_target = Point3::new(
+            (light_pos.x + (light_dir.x*-2000.0)), 
+            (light_pos.y + (light_dir.y*-2000.0)), 
+            (light_pos.z + (light_dir.z*-2000.0))); 
         let light_view = cgmath::Matrix4::look_at_rh(
-            Point3 { 
-                x: light_pos.x, 
-                y: light_pos.y, 
-                z: light_pos.z }, 
-            Point3 { 
-                x: 0.0, 
-                y: 0.0, 
-                z: 0.0 }, 
+            light_target, 
+            light_pos,
             Vector3::unit_y());
         
-        let shadow_size = 20.0;
+        let shadow_size = 4000.0;
         let light_projection = cgmath::ortho(
             -shadow_size, shadow_size, 
             -shadow_size, shadow_size, 
-            0.1, 100.0);
+            -4000.0, 4000.0);
         let light_view_projection = light_projection * light_view;
 
         DirectionalLightUniformData {

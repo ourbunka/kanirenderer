@@ -411,7 +411,7 @@ impl State {
         //for spawning multiple point light
         let light_num = 1;
         for i in 0..light_num {
-            if i == 1 {
+            if i == 0 {
                 let mut new_light = light::Light::new([99999.0,999999.0,99999.0], cgmath::Deg(-90.0), [0.0, 0.0, 0.0], 0.0);
                 point_light.push(new_light);
                 let new_light_data = point_light[i].generate_point_light_data();
@@ -466,7 +466,7 @@ impl State {
         
         let point_light_buffer = init_new_point_lights_buffer(point_light_data, &device);
 
-        let directional_light = light::DirectionalLight::new([0.0, 1.0, -10.0], [1.0,1.0,1.0]);
+        let directional_light = light::DirectionalLight::new([-0.1, -1.0, -0.225], [1.0,1.0,1.0]);
 
         
         let directional_light_uniform = directional_light.generate_directional_light_data();
@@ -693,6 +693,7 @@ impl State {
             label: Some("Shadow Pipeline Layout"),
             bind_group_layouts: &[
                 &shadow_pass_light_bind_group_layout,
+                &camera_bind_group_layout,
             ],
             push_constant_ranges: &[],
         });
@@ -703,15 +704,17 @@ impl State {
             vertex: wgpu::VertexState{
                 module: &shadow_shader,
                 entry_point: "vs_main",
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x3,
-                        offset: 0,
-                        shader_location: 0,
-                    }],
-                }],
+                buffers: &[model::ModelVertex::desc(), 
+                model::InstanceRaw::desc()],
+                // buffers: &[wgpu::VertexBufferLayout {
+                //     array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                //     step_mode: wgpu::VertexStepMode::Vertex,
+                //     attributes: &[wgpu::VertexAttribute {
+                //         format: wgpu::VertexFormat::Float32x3,
+                //         offset: 0,
+                //         shader_location: 0,
+                //     }],
+                // }],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shadow_shader,
@@ -761,7 +764,7 @@ impl State {
             create_render_pipeline(&device, 
                 &render_pipeline_layout, 
                 config.format, 
-                Some(wgpu::TextureFormat::Depth24PlusStencil8), 
+                Some(wgpu::TextureFormat::Depth32Float), 
                 &[model::ModelVertex::desc(), 
                 model::InstanceRaw::desc()], 
                 shader)
@@ -775,7 +778,7 @@ impl State {
             create_wireframe_pipeline(&device, 
                 &render_pipeline_layout, 
                 config.format, 
-                Some(wgpu::TextureFormat::Depth24PlusStencil8), 
+                Some(wgpu::TextureFormat::Depth32Float), 
                 &[model::ModelVertex::desc(), 
                 model::InstanceRaw::desc()], 
                 shader)
@@ -1294,10 +1297,9 @@ impl State {
                     locked_sp.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
                     locked_sp.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                     locked_sp.set_bind_group(0, &self.shadow_pass_light_bind_group, &[]);
+                    locked_sp.set_bind_group(1, &self.camera_bind_group, &[]);
                     locked_sp.draw_indexed(0..mesh.num_elements, 0, (0..model.instances.len() as u32).clone());
                 }
-                
-                //locked_sp.draw_model_instanced(model, 0..model.instances.len() as u32, &self.camera_bind_group, &self.shadow_pass_light_bind_group);
             });
         }
 

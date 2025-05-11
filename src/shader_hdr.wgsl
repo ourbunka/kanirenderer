@@ -36,7 +36,7 @@ struct VertexOutput {
     @location(6) tangent_matrix_c1: vec3<f32>,
     @location(7) tangent_matrix_c2: vec3<f32>,
     @location(8) world_position: vec3<f32>,
-    @location(9) shadow_coord: vec4<f32>,
+    @location(9) shadow_coord: vec3<f32>,
 };
 
 struct Light {
@@ -97,20 +97,21 @@ fn vs_main(
     let world_bitangent = normalize(normal_matrix * model.bitangent);
     let tangent_matrix = transpose(mat3x3<f32>(world_tangent, world_bitangent, world_normal));
     
-    let world_position = (model_matrix * vec4<f32>(model.position, 1.0)).xyz;
+    let world_position = model_matrix * vec4<f32>(model.position, 1.0);
 
     var out: VertexOutput;
-    out.clip_position = camera.view_proj * vec4<f32>(world_position, 1.0);
+    out.clip_position = camera.view_proj * vec4<f32>(world_position.xyz, 1.0);
     out.tex_coords = model.tex_coords;
-    out.tangent_position = tangent_matrix * world_position;
+    out.tangent_position = tangent_matrix * world_position.xyz;
     out.tangent_view_position = tangent_matrix * camera.view_pos.xyz;
     out.tangent_light_position = tangent_matrix * light.position;
     out.position = model.position;
     out.tangent_matrix_c0 = tangent_matrix[0];
     out.tangent_matrix_c1 = tangent_matrix[1];
     out.tangent_matrix_c2 = tangent_matrix[2];
-    out.world_position = world_position;
-    out.shadow_coord = directionalLight.view_projection * vec4<f32>(world_position, 1.0);
+    out.world_position = world_position.xyz;
+    let pos_from_light = directionalLight.view_projection * model_matrix * vec4<f32>(model.position, 1.0);
+    out.shadow_coord = vec3<f32>(pos_from_light.xy* vec2<f32>(0.5,-0.5)+vec2(0.5), pos_from_light.z);
     return out;
 }
 
@@ -137,17 +138,24 @@ var shadow_sampler: sampler_comparison;
 
 
 fn sample_shadow_pcf(uv: vec2<f32>, depth: f32) -> f32 {
-    let size = vec2<f32>(textureDimensions(shadow_map));
-    let texel_size = 1.0 / size;
-    var shadow = 0.0;
-    let kernel_size = 1;
-    for (var y = -kernel_size; y <= kernel_size; y = y + 1) {
-        for (var x = -kernel_size; x <= kernel_size; x = x + 1) {
-            let offset = vec2<f32>(f32(x), f32(y)) * texel_size;
-            shadow = shadow + textureSampleCompare(shadow_map, shadow_sampler, uv + offset, depth);
+    let texel_size = vec2<f32>(1.0) / vec2<f32>(textureDimensions(shadow_map));
+        let sample_count = 9.0; // 3x3 kernel
+        var shadow: f32 = 0.0;
+
+        // 3x3 PCF kernel
+        for (var y: i32 = -1; y <= 1; y = y + 1) {
+            for (var x: i32 = -1; x <= 1; x = x + 1) {
+                let offset = vec2<f32>(f32(x), f32(y)) * texel_size;
+                shadow = shadow + textureSampleCompare(
+                    shadow_map,
+                    shadow_sampler,
+                    uv + offset,
+                    depth
+                );
+            }
         }
-    }
-    return shadow / f32((2 * kernel_size + 1) * (2 * kernel_size + 1));
+        shadow = shadow / sample_count;
+        return shadow;
 }
 
 @fragment
@@ -198,14 +206,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let tangent_matrix = mat3x3<f32>(in.tangent_matrix_c0, in.tangent_matrix_c1, in.tangent_matrix_c2);
     
-    //let light_space_pos = directionalLight.view_projection * camera.view_proj * model_matrix * vec4<f32>(in.position, 1.0); //vec4<f32>(in.position, 1.0); //in.world_position; //vec4<f32>(in.position, 1.0); //in.tangent_position, 1.0);
-    //let ndc = light_space_pos.xyz/light_space_pos.w;
-    //let shadow_uv = vec2<f32>(ndc.x *0.5+0.5, 1.0-(ndc.y * 0.5+ 0.5));
-    //let shadow_depth = ndc.z;
-    
-    let shadow_coord = in.shadow_coord.xyz/ in.shadow_coord.w;
-    let shadow_coord_ndc =  vec2<f32>(shadow_coord.x * 0.5 + 0.5, shadow_coord.y * 0.5 + 0.5);
-    let shadow_depth = shadow_coord.z;
+    let shadow_coord_ndc = in.shadow_coord.xy;  // vec2<f32>(shadow_coord.x * 0.5 + 0.5, shadow_coord.y * 0.5 + 0.5);
+    let shadow_depth = in.shadow_coord.z;
 
     let shadow_factor = sample_shadow_pcf(shadow_coord_ndc, shadow_depth);  //textureSampleCompare(shadow_map, shadow_sampler, shadow_uv, shadow_depth);
     

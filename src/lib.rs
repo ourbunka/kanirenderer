@@ -67,7 +67,9 @@ impl CameraUniform {
 // }
 
 enum RenderOutputMode {
-    Colored,
+    Unlit,
+    Lit,
+    LitWithShadow,
     Wireframe,
 }
 
@@ -113,8 +115,9 @@ struct State {
     shadow_shader: ShaderModule,
     shadow_bind_group: BindGroup,
     shadow_pass_light_bind_group: BindGroup,
-    shadow_pipeline_layout: PipelineLayout,
     shadow_pipeline: RenderPipeline,
+    unlit_render_pipeline: RenderPipeline,
+    lit_render_pipeline: RenderPipeline,
     movable_light: light::Light,
     movable_light_controller: light::MovableLightController,
     mouse_pressed: bool,
@@ -236,7 +239,7 @@ fn create_wireframe_pipeline(
 }
 fn optional_features() -> wgpu::Features {
         let mut f = wgpu::Features::POLYGON_MODE_LINE;
-        f.insert(wgpu::Features::VERTEX_WRITABLE_STORAGE);
+        //f.insert(wgpu::Features::VERTEX_WRITABLE_STORAGE);
         //wgpu::Features::VERTEX_WRITABLE_STORAGE
         f
     }
@@ -476,7 +479,6 @@ impl State {
             contents: bytemuck::cast_slice(&[directional_light_uniform]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
-        //let directional_light_uniform = init_new_directional_lights_Uniform(directional_light_uniform_data.clone(), &device);
 
         let light_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             entries: &[
@@ -706,15 +708,6 @@ impl State {
                 entry_point: "vs_main",
                 buffers: &[model::ModelVertex::desc(), 
                 model::InstanceRaw::desc()],
-                // buffers: &[wgpu::VertexBufferLayout {
-                //     array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
-                //     step_mode: wgpu::VertexStepMode::Vertex,
-                //     attributes: &[wgpu::VertexAttribute {
-                //         format: wgpu::VertexFormat::Float32x3,
-                //         offset: 0,
-                //         shader_location: 0,
-                //     }],
-                // }],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shadow_shader,
@@ -737,10 +730,60 @@ impl State {
             multiview: None,
         });
 
-        
+        let unlit_render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Unlit Render Pipeline Layout"),
+            bind_group_layouts: &[
+                &texture_bind_group_layout,
+                &camera_bind_group_layout,
+            ],
+            push_constant_ranges: &[],
+        });
+        let unlit_shader = include_str!("unlit_shader.wgsl").into();
+
+        let unlit_render_pipeline = {
+            let shader = wgpu::ShaderModuleDescriptor {
+                label: Some("Unlit Shader"),
+                source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(unlit_shader)),
+            };
+
+            create_render_pipeline(&device, 
+                &unlit_render_pipeline_layout, 
+                config.format, 
+                Some(wgpu::TextureFormat::Depth32Float), 
+                &[model::ModelVertex::desc(), 
+                model::InstanceRaw::desc()], 
+                shader)
+        };
+
+        let lit_shader = include_str!("lit_shader.wgsl").into();
+
+        let lit_render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Lit Without Shadow Map Render Pipeline Layout"),
+            bind_group_layouts: &[
+                &texture_bind_group_layout,
+                &camera_bind_group_layout,
+                &light_bind_group_layout,
+            ],
+            push_constant_ranges: &[],
+        });
+
+        let lit_render_pipeline = {
+            let shader = wgpu::ShaderModuleDescriptor {
+                label: Some("Lit Without Shadow Map Shader"),
+                source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(lit_shader)),
+            };
+
+            create_render_pipeline(&device, 
+                &lit_render_pipeline_layout, 
+                config.format, 
+                Some(wgpu::TextureFormat::Depth32Float), 
+                &[model::ModelVertex::desc(), 
+                model::InstanceRaw::desc()], 
+                shader)
+        };
 
         let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Render Pipeline Layout"),
+            label: Some("Lit Without Shadow Map Render Pipeline Layout"),
             bind_group_layouts: &[
                 &texture_bind_group_layout,
                 &camera_bind_group_layout,
@@ -816,7 +859,7 @@ impl State {
         } 
         println!("total movable model/object : {:?}",movable_model_counts*instances_num);
         
-        let mut render_output_mode = RenderOutputMode::Colored;
+        let mut render_output_mode = RenderOutputMode::LitWithShadow;
 
 
         Self {
@@ -854,8 +897,9 @@ impl State {
             shadow_shader,
             shadow_bind_group,
             shadow_pass_light_bind_group,
-            shadow_pipeline_layout,
             shadow_pipeline,
+            unlit_render_pipeline,
+            lit_render_pipeline,
             mouse_pressed: false,
             //single point light to be removed after implementing movable light controller with ability to control each light in Vec<Light>
             movable_light,
@@ -912,8 +956,10 @@ impl State {
                     //handle render mode switching, to redo
                     if *key == VirtualKeyCode::Tab && *state == ElementState::Released {
                        match self.render_output_mode {
-                            RenderOutputMode::Colored => {self.render_output_mode = RenderOutputMode::Wireframe; true}
-                            RenderOutputMode::Wireframe => {self.render_output_mode = RenderOutputMode::Colored; true}
+                            RenderOutputMode::Unlit => {self.render_output_mode = RenderOutputMode::Lit; true}
+                            RenderOutputMode::Lit => {self.render_output_mode = RenderOutputMode::LitWithShadow; true}
+                            RenderOutputMode::LitWithShadow => {self.render_output_mode = RenderOutputMode::Wireframe; true}
+                            RenderOutputMode::Wireframe => {self.render_output_mode = RenderOutputMode::Unlit; true}
                         } 
                     } else if *key == VirtualKeyCode::F11 && *state == ElementState::Released {
                         println!("updating window mode");
@@ -1274,34 +1320,39 @@ impl State {
             label: Some("Render Encoder"),
         });
 
-        {
-            let mut shadow_pass = Arc::new(Mutex::new(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Shadow Pass"),
-                color_attachments: &[], // No color output
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.shadow_texture_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0), // Clear to max depth
-                        store: true,
+        //shadow pass
+        match self.render_output_mode{
+            RenderOutputMode::LitWithShadow => {
+                let mut shadow_pass = Arc::new(Mutex::new(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Shadow Pass"),
+                    color_attachments: &[], // No color output
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.shadow_texture_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0), // Clear to max depth
+                            store: true,
+                        }),
+                        stencil_ops: None,
                     }),
-                    stencil_ops: None,
-                }),
-            })));
-            shadow_pass.lock().unwrap().set_pipeline(&self.shadow_pipeline);
-            shadow_pass.lock().unwrap().set_bind_group(0, &self.shadow_pass_light_bind_group, &[]);
-            &self.models.par_iter().for_each(|model|{
-                let vb =model.instance_buffer.slice(..);
-                let mut locked_sp = shadow_pass.lock().unwrap();
-                locked_sp.set_vertex_buffer(1, vb );
-                for mesh in &model.meshes{
-                    locked_sp.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                    locked_sp.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                    locked_sp.set_bind_group(0, &self.shadow_pass_light_bind_group, &[]);
-                    locked_sp.set_bind_group(1, &self.camera_bind_group, &[]);
-                    locked_sp.draw_indexed(0..mesh.num_elements, 0, (0..model.instances.len() as u32).clone());
-                }
-            });
+                })));
+                shadow_pass.lock().unwrap().set_pipeline(&self.shadow_pipeline);
+                shadow_pass.lock().unwrap().set_bind_group(0, &self.shadow_pass_light_bind_group, &[]);
+                &self.models.par_iter().for_each(|model|{
+                    let vb =model.instance_buffer.slice(..);
+                    let mut locked_sp = shadow_pass.lock().unwrap();
+                    locked_sp.set_vertex_buffer(1, vb );
+                    for mesh in &model.meshes{
+                        locked_sp.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                        locked_sp.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                        locked_sp.set_bind_group(0, &self.shadow_pass_light_bind_group, &[]);
+                        locked_sp.set_bind_group(1, &self.camera_bind_group, &[]);
+                        locked_sp.draw_indexed(0..mesh.num_elements, 0, (0..model.instances.len() as u32).clone());
+                    }
+                });
+            }
+            _ => {}
         }
+        
 
         {
             let mut render_pass = Arc::new(Mutex::new(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1329,11 +1380,48 @@ impl State {
                 }),
             })));
 
-            //render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
-
             use crate::model::DrawModel;
             match self.render_output_mode {
-                RenderOutputMode::Colored => {
+                RenderOutputMode::Unlit => {
+                    render_pass.lock().unwrap().set_pipeline(&self.unlit_render_pipeline);
+                    &self.models.par_iter().for_each(|model|{
+                        let vb =model.instance_buffer.slice(..);
+                        let mut locked_rp = render_pass.lock().unwrap();
+                        locked_rp.set_vertex_buffer(1, vb );
+
+                        for mesh in &model.meshes{
+                            locked_rp.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                            locked_rp.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                            if !&model.materials.is_empty() {
+                                let material = &model.materials[mesh.material];
+                                locked_rp.set_bind_group(0, &material.bind_group, &[]);
+                            }
+                            locked_rp.set_bind_group(1, &self.camera_bind_group, &[]);
+                            locked_rp.draw_indexed(0..mesh.num_elements, 0, (0..model.instances.len() as u32).clone());
+                        }
+                    });
+                }
+                RenderOutputMode::Lit => {
+                    render_pass.lock().unwrap().set_pipeline(&self.lit_render_pipeline);
+                    &self.models.par_iter().for_each(|model|{
+                        let vb =model.instance_buffer.slice(..);
+                        let mut locked_rp = render_pass.lock().unwrap();
+                        locked_rp.set_vertex_buffer(1, vb );
+
+                        for mesh in &model.meshes{
+                            locked_rp.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                            locked_rp.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                            if !&model.materials.is_empty() {
+                                let material = &model.materials[mesh.material];
+                                locked_rp.set_bind_group(0, &material.bind_group, &[]);
+                            }
+                            locked_rp.set_bind_group(1, &self.camera_bind_group, &[]);
+                            locked_rp.set_bind_group(2, &self.light_bind_group, &[]);
+                            locked_rp.draw_indexed(0..mesh.num_elements, 0, (0..model.instances.len() as u32).clone());
+                        }
+                    });
+                }
+                RenderOutputMode::LitWithShadow => {
                     //println!("rendering Colored");
                     render_pass.lock().unwrap().set_pipeline(&self.render_pipeline);
                     &self.models.par_iter().for_each(|model|{
@@ -1349,9 +1437,8 @@ impl State {
                     // }
                 }
                 RenderOutputMode::Wireframe => {
-                    render_pass.lock().unwrap().set_pipeline(&self.wireframe_pipeline);
-                    render_pass.lock().unwrap().set_bind_group(0, &self.light_bind_group, &[]);
                     //println!("rendering Wireframe");
+                    render_pass.lock().unwrap().set_pipeline(&self.wireframe_pipeline);
                     &self.models.par_iter().for_each(|model|{
                         let vb =model.instance_buffer.slice(..);
                         let mut locked_rp = render_pass.lock().unwrap();

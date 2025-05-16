@@ -18,7 +18,7 @@ use cgmath::{num_traits::ToPrimitive, perspective, prelude::*, Vector3};
 use rand::Rng;
 use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use texture::Texture;
-use wgpu::{util::DeviceExt, BindGroup, PipelineLayout, RenderPipeline, Sampler, ShaderModule, TextureView};
+use wgpu::{util::DeviceExt, BindGroup, BindGroupLayout, Buffer, PipelineLayout, RenderPipeline, Sampler, ShaderModule, TextureView};
 use winit::{
     event::*,
     event_loop::{ControlFlow, EventLoop},
@@ -29,7 +29,11 @@ use wgpu::TextureFormat;
 use crate::resources::*;
 
 
-
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct DebugVert {
+    position: [f32;2],
+}
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -71,6 +75,7 @@ enum RenderOutputMode {
     Lit,
     LitWithShadow,
     Wireframe,
+    DebugLitWithShadow,
 }
 
 enum WindowMode{
@@ -99,6 +104,7 @@ struct State {
     // instance_buffer: wgpu::Buffer,
     depth_texture: wgpu::Texture,
     depth_view: TextureView,
+    depth_sampler: wgpu::Sampler,
     models : Vec<model::Model>,
     light_uniform: light::LightUniform,
     light_buffer: wgpu::Buffer,
@@ -118,6 +124,13 @@ struct State {
     shadow_pipeline: RenderPipeline,
     unlit_render_pipeline: RenderPipeline,
     lit_render_pipeline: RenderPipeline,
+    debug_pass_pipeline: RenderPipeline,
+    debug_pass_bind_group: BindGroup,
+    debug_depth_bind_group_layout: BindGroupLayout,
+    debug_vertex_buffer: wgpu::Buffer,
+    debug_index_buffer: wgpu::Buffer,
+    debug_indices: Vec<i32>,
+    debug_vert: Vec<[f32;2]>,
     movable_light: light::Light,
     movable_light_controller: light::MovableLightController,
     mouse_pressed: bool,
@@ -339,7 +352,7 @@ impl State {
 
         let camera = camera::Camera::new((0.0, 5.0, 10.0), cgmath::Deg(-90.0), cgmath::Deg(-20.0));
 
-        let projection = camera::Projection::new(config.width, config.height, cgmath::Deg(45.0), 0.1, 100.0);
+        let projection = camera::Projection::new(config.width, config.height, cgmath::Deg(45.0), 0.1, 10000.0);
         
         let camera_controller = camera::CameraController::new(300.0, 0.4);
 
@@ -546,11 +559,143 @@ impl State {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format:wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
 
-        let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor{
+            label: Some("depth view"),
+            dimension: Some(wgpu::TextureViewDimension::D2),
+            format: Some(wgpu::TextureFormat::Depth32Float),
+            ..Default::default()
+        });
+
+        let depth_sampler =  device.create_sampler(&wgpu::SamplerDescriptor{
+            label: Some("Depth Sampler"),
+            compare: None,
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        let debug_vert = vec![
+            [-1.0 as f32, -1.0], // Bottom-left
+            [1.0, -1.0],  // Bottom-right
+            [1.0, 1.0],   // Top-right
+            [-1.0, 1.0],  // Top-left
+        ];
+
+        let debug_indices = vec![0, 1, 2, 0, 2, 3]; //two triangles
+
+        let debug_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label:Some("Debug Quad Vert Buffer"),
+            contents: bytemuck::cast_slice(&debug_vert),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let debug_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Debug Indices Buffer"),
+            contents: bytemuck::cast_slice(&debug_indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+
+        let debug_vertex_buffer_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<DebugVert>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 0,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
+            ],
+        };
+
+        let debug_depth_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor{
+            label: Some("Debug Depth Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("debug_depth.wgsl").into()),
+        });
+
+        let debug_depth_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor{
+            label: Some("Debug Depth Bind Group Layout"),
+            entries: &[
+                //depth texture
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture { 
+                        sample_type: wgpu::TextureSampleType::Depth, 
+                        view_dimension: wgpu::TextureViewDimension::D2, 
+                        multisampled: false, 
+                    },
+                    count: None,
+                },
+                //debug depth sampler
+                wgpu::BindGroupLayoutEntry{
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    count: None,
+                },
+            ],
+        });
+
+        let debug_pass_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor{
+            label:Some("Debug Pass Bind Group"),
+            layout: &debug_depth_bind_group_layout,
+            entries: &[
+                //depth texture
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&depth_view)
+                },
+                //depth samplers
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&depth_sampler),
+                }
+            ]
+        });
+
+        let debug_pass_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor{
+            label: Some("Debug Depth Pass Pipeline Layout"),
+            bind_group_layouts:&[
+                &debug_depth_bind_group_layout,
+            ],
+            push_constant_ranges: &[],
+        });
+
+        let debug_pass_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor { 
+            label: Some("Debug Pass Render Pipeline"), 
+            layout: Some(&debug_pass_pipeline_layout), 
+            vertex: wgpu::VertexState{
+                module: &debug_depth_shader,
+                entry_point: "vs_main",
+                buffers: &[debug_vertex_buffer_layout],
+            }, 
+            fragment: Some(wgpu::FragmentState {
+                module: &debug_depth_shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState{
+                    format: config.format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }), 
+            primitive: wgpu::PrimitiveState{
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                ..Default::default()
+            }, 
+            depth_stencil: None, 
+            multisample: wgpu::MultisampleState::default(),             
+            multiview: None,
+        });
 
         //to do
         let useDeferredRenderer = false;
@@ -591,7 +736,7 @@ impl State {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
-        
+
         let shadow_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor{
             label:Some("Shadow Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shadow.wgsl").into()),
@@ -783,7 +928,7 @@ impl State {
         };
 
         let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Lit Without Shadow Map Render Pipeline Layout"),
+            label: Some("Lit With Shadow Map Render Pipeline Layout"),
             bind_group_layouts: &[
                 &texture_bind_group_layout,
                 &camera_bind_group_layout,
@@ -826,9 +971,6 @@ impl State {
                 model::InstanceRaw::desc()], 
                 shader)
         };
-
-        
-
 
         use std::time::{Duration,Instant};
         let start_loading_time = Instant::now();
@@ -881,6 +1023,7 @@ impl State {
             camera_bind_group,
             depth_texture,
             depth_view,
+            depth_sampler,
             models,
             point_light,
             point_light_buffer,
@@ -900,6 +1043,13 @@ impl State {
             shadow_pipeline,
             unlit_render_pipeline,
             lit_render_pipeline,
+            debug_pass_pipeline,
+            debug_pass_bind_group,
+            debug_depth_bind_group_layout,
+            debug_vertex_buffer,
+            debug_index_buffer,
+            debug_indices,
+            debug_vert,
             mouse_pressed: false,
             //single point light to be removed after implementing movable light controller with ability to control each light in Vec<Light>
             movable_light,
@@ -925,18 +1075,35 @@ impl State {
             self.depth_texture = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("Scene Depth Texture"),
                 size: wgpu::Extent3d {
-                    width: self.size.width, // Same as HDR render target
+                    width: self.size.width, 
                     height: self.size.height,
                     depth_or_array_layers: 1,
                 },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Depth32Float, // Common depth format
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                format: wgpu::TextureFormat::Depth32Float,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             });
             self.depth_view = self.depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+            self.debug_pass_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor{
+                label:Some("Debug Pass Bind Group"),
+                layout: &self.debug_depth_bind_group_layout,
+                entries: &[
+                    //depth texture
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&self.depth_view)
+                    },
+                    //depth samplers
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.depth_sampler),
+                    }
+                ]
+            });
         }
     }
 
@@ -959,7 +1126,8 @@ impl State {
                             RenderOutputMode::Unlit => {self.render_output_mode = RenderOutputMode::Lit; true}
                             RenderOutputMode::Lit => {self.render_output_mode = RenderOutputMode::LitWithShadow; true}
                             RenderOutputMode::LitWithShadow => {self.render_output_mode = RenderOutputMode::Wireframe; true}
-                            RenderOutputMode::Wireframe => {self.render_output_mode = RenderOutputMode::Unlit; true}
+                            RenderOutputMode::Wireframe => {self.render_output_mode = RenderOutputMode::DebugLitWithShadow; true}
+                            RenderOutputMode::DebugLitWithShadow => {self.render_output_mode = RenderOutputMode::Unlit; true}
                         } 
                     } else if *key == VirtualKeyCode::F11 && *state == ElementState::Released {
                         println!("updating window mode");
@@ -1451,7 +1619,45 @@ impl State {
                     //     render_pass.lock().unwrap().draw_model_instanced(model, 0..model.instances.len() as u32, &self.camera_bind_group, &self.light_bind_group);
                     // }
                 }
+                RenderOutputMode::DebugLitWithShadow => {
+                    render_pass.lock().unwrap().set_pipeline(&self.render_pipeline);
+                    &self.models.par_iter().for_each(|model|{
+                        let vb =model.instance_buffer.slice(..);
+                        let mut locked_rp = render_pass.lock().unwrap();
+                        locked_rp.set_vertex_buffer(1, vb );
+
+                        locked_rp.draw_model_instanced(model, 0..model.instances.len() as u32, &self.camera_bind_group, &self.light_bind_group, &self.shadow_bind_group);
+                    });
+                }
             }
+        }
+
+        //debug pass
+        match self.render_output_mode {
+            RenderOutputMode::DebugLitWithShadow => {
+                let mut debug_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor{
+                    label: Some("Debug Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops:wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: true,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    //..Default::default()
+                });
+
+                debug_pass.set_pipeline(&self.debug_pass_pipeline);
+                debug_pass.set_bind_group(0, &self.debug_pass_bind_group, &[]);
+                debug_pass.set_vertex_buffer(0, self.debug_vertex_buffer.slice(..));
+                debug_pass.set_index_buffer(self.debug_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                debug_pass.draw_indexed(0..self.debug_indices.len() as u32, 0, 0..1);
+            }
+            _ => {
+                //skip debug pass
+                }
         }
 
         

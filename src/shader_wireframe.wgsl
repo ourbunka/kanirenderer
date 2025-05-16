@@ -132,8 +132,13 @@ var shadow_map: texture_depth_2d;
 @group(3) @binding(1)
 var shadow_sampler: sampler_comparison;
 
+@group(3) @binding(2)
+var depth_t: texture_depth_2d;
+@group(3) @binding(3)
+var depth_s: sampler;
+
 @fragment
 
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(0.0,0.0,0.0,1.0);
+    return vec4<f32>(1.0,1.0,1.0,1.0);
 }

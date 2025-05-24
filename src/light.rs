@@ -50,9 +50,10 @@ pub struct PointLightData {
 
 pub struct DirectionalLight {
     pub color: [f32;3],
-    pub _padding: f32,
+    pub distance: f32,
     pub light_direction: [f32;3],
     pub intensity: f32,
+    pub shadow_scene_size: f32,
 }
 
 #[repr(C)]
@@ -69,32 +70,33 @@ impl DirectionalLight {
     pub fn new(direction: [f32;3],color: [f32;3]) -> Self {
         Self {
             color: color,
-            _padding: 1.0,
+            distance: -2000.0,
             light_direction: direction,
             intensity:2.0,
+            shadow_scene_size: 3000.0,
         }
     }
 
     pub fn generate_directional_light_data(&self) -> DirectionalLightUniformData {
         let direction = self.light_direction;
         let color = self.color;
-        println!("light direction : {:?}", direction);
+        //println!("light direction : {:?}", direction);
         let light_dir = Point3::new(direction[0], direction[1], direction[2]);
         let light_pos = Point3::new(0.0, 0.0, 0.0);
         let light_target = Point3::new(
-            (light_pos.x + (light_dir.x*-2000.0)), 
-            (light_pos.y + (light_dir.y*-2000.0)), 
-            (light_pos.z + (light_dir.z*-2000.0))); 
+            (light_pos.x + (light_dir.x*self.distance)), 
+            (light_pos.y + (light_dir.y*self.distance)), 
+            (light_pos.z + (light_dir.z*self.distance))); 
         let light_view = cgmath::Matrix4::look_at_rh(
             light_target, 
             light_pos,
             Vector3::unit_y());
         
-        let shadow_size = 4000.0;
+        let shadow_size = self.shadow_scene_size;
         let light_projection = cgmath::ortho(
             -shadow_size, shadow_size, 
             -shadow_size, shadow_size, 
-            -4000.0, 4000.0);
+            -shadow_size, shadow_size);
         let light_view_projection = light_projection * light_view;
 
         DirectionalLightUniformData {
@@ -104,6 +106,15 @@ impl DirectionalLight {
             intensity: self.intensity,
             view_projection: light_view_projection.into(),
         }
+    }
+
+    pub fn rotate_light(&mut self, new_x: f32, new_y: f32, new_z: f32) {
+        let rot_x = Matrix4::from_angle_x(Rad::from(Deg(new_x)));
+        let rot_y = Matrix4::from_angle_y(Rad::from(Deg(new_y)));
+        let rot_z = Matrix4::from_angle_z(Rad::from(Deg(new_z)));
+        let matrix = rot_z * rot_y * rot_x;
+        let final_dir = matrix.transform_vector(self.light_direction.into());
+        self.light_direction = [final_dir.x, final_dir.y, final_dir.z];
     }
 }
 

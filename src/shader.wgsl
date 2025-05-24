@@ -161,7 +161,10 @@ fn sample_shadow_pcf(uv: vec2<f32>, depth: f32) -> f32 {
 @fragment
 
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    var object_color: vec3<f32> = textureSample(t_diffuse, s_diffuse, in.tex_coords).rgb;
+    var color_texture: vec4<f32> = textureSample(t_diffuse, s_diffuse, in.tex_coords).rgba;
+    var object_color: vec3<f32> = color_texture.rgb;
+    let alpha = color_texture.a;
+
     let object_normal: vec3<f32> = textureSample(t_normal, s_normal, in.tex_coords).xyz;
     let light_distance = length(light.position - in.world_position);
 
@@ -190,7 +193,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let specular_strength = pow(max(dot(tangent_normal, half_dir), 0.0), 32.0);
     var specular_color = specular_strength * light.color;
 
-    var result = ambient_color * object_color;
+    var result = vec3<f32>(0.0,-0.0,0.0);
     
     
     //directional light
@@ -214,7 +217,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let dl_result = (dl_diffuse_color + dl_specular_color) *shadow_factor * object_color;
     //add directional light result
     result += dl_result;
-   
+    result +=  (ambient_color * object_color);
+
     //add movable point light result
     result += ((diffuse_color + specular_color)*attenuation*range_attenuation)* object_color;
 
@@ -252,5 +256,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     }
     let out = reinnhard_tonemap(result);
+    //todo in a seperate pass that render ordered masked/alpha meshes
+    //return vec4<f32>(out,alpha);
     return vec4<f32>(out,1.0);
+
 }

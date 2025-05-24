@@ -1,10 +1,60 @@
-use image::GenericImageView;
+use image::{DynamicImage, GenericImageView};
 use anyhow::*;
-
+use std::result::Result::Ok;
 pub struct Texture {
     pub texture: wgpu::Texture,
     pub view: wgpu::TextureView,
     pub sampler: wgpu::Sampler,
+}
+
+fn invert_green_channel(image: &mut DynamicImage) {
+    match image {
+        DynamicImage::ImageRgb8(img) => {
+            for (x, y, pixel) in img.enumerate_pixels_mut() {
+                let mut new_pixel = *pixel;
+                new_pixel[1] = 255 - pixel[1];
+                *pixel = new_pixel;
+            }
+        },
+        DynamicImage::ImageRgba8(img) => {
+            for (x, y, pixel) in img.enumerate_pixels_mut() {
+                let mut new_pixel = *pixel;
+                new_pixel[1] = 255 - pixel[1];
+                *pixel = new_pixel;
+            }
+        },
+        DynamicImage::ImageRgb16(img) => {
+            for (x, y, pixel) in img.enumerate_pixels_mut() {
+                let mut new_pixel = *pixel;
+                new_pixel[1] = 65535 - pixel[1]; // 16-bit inversion
+                *pixel = new_pixel;
+            }
+        },
+        DynamicImage::ImageRgba16(img) => {
+            for (x, y, pixel) in img.enumerate_pixels_mut() {
+                let mut new_pixel = *pixel;
+                new_pixel[1] = 65535 - pixel[1]; // 16-bit inversion
+                *pixel = new_pixel;
+            }
+        },
+        DynamicImage::ImageRgb32F(img) => {
+            for (x, y, pixel) in img.enumerate_pixels_mut() {
+                let mut new_pixel = *pixel;
+                new_pixel[1] = 1.0 - pixel[1]; // 32-bit float inversion
+                *pixel = new_pixel;
+            }
+        },
+        DynamicImage::ImageRgba32F(img) => {
+            for (x, y, pixel) in img.enumerate_pixels_mut() {
+                let mut new_pixel = *pixel;
+                new_pixel[1] = 1.0 - pixel[1]; // 32-bit float inversion
+                *pixel = new_pixel;
+            }
+        },
+        _ => {
+            println!("Unsupported image format for green channel inversion.");
+        }
+    }
 }
 
 impl Texture {
@@ -15,7 +65,12 @@ impl Texture {
         label:&str,
         is_normal_map: bool,
     ) -> Result<Self> {
-        let img = image::load_from_memory(bytes)?;
+        let img_res = image::load_from_memory(bytes);
+        let mut img;
+        match img_res {
+            Ok(i) => {img = i;}
+            Err(err) => {println!("{:?}",err); return Err(err.into());}
+        }
         Self::from_image(device, queue, &img, Some(label), is_normal_map)
     }
 
@@ -26,8 +81,16 @@ impl Texture {
         label:&str,
         is_normal_map: bool,
     ) -> Result<Self> {
-        let img = image::load_from_memory(bytes)?;
-        let flippedimg = img.flipv();
+        let img_res = image::load_from_memory(bytes);
+        let mut img;
+        match img_res {
+            Ok(i) => {img = i;}
+            Err(err) => {println!("{:?}",err); return Err(err.into());}
+        }
+        let mut flippedimg = img.flipv();
+        if is_normal_map{
+            invert_green_channel(&mut flippedimg);
+        }
         Self::from_image(device, queue, &flippedimg, Some(label), is_normal_map)
     }
 
@@ -48,7 +111,19 @@ impl Texture {
         };
 
         let format = if is_normal_map{
-            wgpu::TextureFormat::Rgba8Unorm
+            match img.color(){
+                image::ColorType::L8 => {wgpu::TextureFormat::Rgba8Unorm},
+                image::ColorType::La8 => {wgpu::TextureFormat::Rgba8Unorm},
+                image::ColorType::Rgb8=> {wgpu::TextureFormat::Rgba8Unorm},
+                image::ColorType::Rgba8=> {wgpu::TextureFormat::Rgba8Unorm},
+                image::ColorType::L16=> {wgpu::TextureFormat::Rgba16Unorm},
+                image::ColorType::La16=> {wgpu::TextureFormat::Rgba16Unorm},
+                image::ColorType::Rgb16=> {wgpu::TextureFormat::Rgba16Unorm},
+                image::ColorType::Rgba16=> {wgpu::TextureFormat::Rgba16Unorm},
+                image::ColorType::Rgb32F=> {wgpu::TextureFormat::Rgba32Float},
+                image::ColorType::Rgba32F=> {wgpu::TextureFormat::Rgba32Float},
+                _ => {wgpu::TextureFormat::Rgba8Unorm},
+                            }
         } else {
             wgpu::TextureFormat::Rgba8UnormSrgb
         };
@@ -90,8 +165,9 @@ impl Texture {
                 address_mode_v: wgpu::AddressMode::Repeat,
                 address_mode_w: wgpu::AddressMode::Repeat,
                 mag_filter: wgpu::FilterMode::Linear,
-                min_filter: wgpu::FilterMode::Nearest,
-                mipmap_filter: wgpu::FilterMode::Nearest,
+                min_filter: wgpu::FilterMode::Linear,
+                mipmap_filter: wgpu::FilterMode::Linear,
+                border_color: None,
                 ..Default::default()
             }
         );

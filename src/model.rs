@@ -85,7 +85,7 @@ impl Model {
 }
 pub fn test_move_model_vec3(vec_pos: Vector3<f32> , dt: Duration) ->Vector3<f32> {
     let mut rng = rand::rng();
-    let newpos = vec_pos - (Vector3::new(rng.random_range(-10.0..10.0), rng.random_range(-10.0..10.0), rng.random_range(-10.0..10.0)) * (dt.as_millis().to_f32().unwrap()));
+    let newpos = vec_pos - (Vector3::new((rng.random_range(-10.0..10.0)), rng.random_range(-10.0..10.0), rng.random_range(-10.0..10.0)) * (dt.as_millis().to_f32().unwrap()));
     newpos
     //let instance_data = self.instances.iter().map(Instance::to_raw).collect::<Vec<_>>();    
 

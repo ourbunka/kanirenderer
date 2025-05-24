@@ -1,6 +1,6 @@
 #![allow(warnings)] 
 
-use std::{clone, default, ops::Deref, sync::{mpsc::{self, Receiver, Sender, SyncSender}, Arc, Mutex}, thread, vec};
+use std::{clone, default, env, fs::{read, File}, io::BufWriter, ops::Deref, sync::{mpsc::{self, Receiver, Sender, SyncSender}, Arc, Mutex}, thread, vec};
 mod texture;
 mod model;
 mod resources;
@@ -8,21 +8,19 @@ mod camera;
 mod light;
 mod deferredRenderPipeline;
 
-use bytemuck::Contiguous;
-use image::buffer;
+use bytemuck::{cast_slice, Contiguous};
+use image::{buffer, ImageBuffer, Rgba};
 use instant::now;
 use light::{init_new_directional_lights_Uniform, init_new_point_lights_buffer, DirectionalLight, DirectionalLightUniformData, PointLightData};
-use log::debug;
 use model::{update_instance_position_rotation, DrawModel, Instance, Model, Vertex};
-use cgmath::{num_traits::ToPrimitive, perspective, prelude::*, Vector3};
+use cgmath::{num_traits::ToPrimitive, perspective, prelude::*, vec4, Vector3};
+use pollster::block_on;
 use rand::Rng;
 use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use texture::Texture;
-use wgpu::{util::DeviceExt, BindGroup, BindGroupLayout, Buffer, PipelineLayout, RenderPipeline, Sampler, ShaderModule, TextureView};
+use wgpu::{util::DeviceExt, BindGroup, BindGroupLayout, Buffer, BufferAddress, BufferSize, BufferUsages, DepthBiasState, Extent3d, ImageCopyBuffer, ImageCopyTexture, ImageDataLayout, Origin3d, PipelineLayout, RenderPipeline, Sampler, ShaderModule, TextureView};
 use winit::{
-    event::*,
-    event_loop::{ControlFlow, EventLoop},
-    window::{WindowBuilder, Fullscreen, self}, dpi::PhysicalSize,
+    dpi::PhysicalSize, event::*, event_loop::{ControlFlow, EventLoop}, platform::windows::{WindowBuilderExtWindows, WindowExtWindows}, window::{self, Fullscreen, WindowBuilder}
 };
 use winit::window::Window;
 use wgpu::TextureFormat;
@@ -35,40 +33,24 @@ struct DebugVert {
     position: [f32;2],
 }
 
-#[repr(C)]
-#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct CameraUniform {
-    view_position: [f32;4],
-    view_proj: [[f32; 4]; 4],
+use winit::platform::windows::IconExtWindows;
+use winit::window::Icon;
+
+fn load_icon(window: &Window){
+    let icon_name = "icon.png";
+    let img_rgba = image::open(icon_name).unwrap().to_rgba8().into_vec();
+    let icon = Icon::from_rgba(img_rgba, 256,256).unwrap();
+    window.set_window_icon(Some(icon.clone()));
+    window.set_taskbar_icon(Some(icon));
 }
 
-impl CameraUniform {
-    fn new() -> Self {
-        //use cgmath::SquareMatrix;
-        Self {
-            view_position: [0.0; 4],
-            view_proj: cgmath::Matrix4::identity().into(),
-        }
-    }
-
-    fn update_view_proj(&mut self, camera: &camera::Camera, projection: &camera::Projection) {
-        //using vec4 because of uniforms 16byte requirement
-        self.view_position = camera.position.to_homogeneous().into();
-        self.view_proj = (projection.calc_matrix() * camera.calc_matrix()).into();
-    }
-
-    
+fn get_icon() -> Icon{
+    let icon_name = "icon.png";
+    let img_rgba = image::open(icon_name).unwrap().to_rgba8().into_vec();
+    let icon = Icon::from_rgba(img_rgba, 256,256).unwrap();
+    icon
 }
 
-
-// #[repr(C)]
-// #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-// struct LightUniform {
-//     position: [f32; 3],
-//     _padding: u32,
-//     color: [f32; 3],
-//     _padding2: u32,
-// }
 
 enum RenderOutputMode {
     Unlit,
@@ -76,6 +58,11 @@ enum RenderOutputMode {
     LitWithShadow,
     Wireframe,
     DebugLitWithShadow,
+}
+
+enum DebugTexture {
+    DepthTexture,
+    ShadowTexture,
 }
 
 enum WindowMode{
@@ -97,7 +84,7 @@ struct State {
     camera: camera::Camera,
     projection: camera::Projection,
     camera_controller: camera::CameraController,
-    camera_uniform: CameraUniform,
+    camera_uniform: camera::CameraUniform,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     // instances: Vec<Instance>,
@@ -134,7 +121,11 @@ struct State {
     movable_light: light::Light,
     movable_light_controller: light::MovableLightController,
     mouse_pressed: bool,
+    left_mouse_pressed: bool,
+    mouse_x: u32,
+    mouse_y: u32,
     render_output_mode: RenderOutputMode,
+    debug_mode_texture: DebugTexture,
 }
 
 fn create_render_pipeline(
@@ -160,9 +151,25 @@ fn create_render_pipeline(
             entry_point: "fs_main",
             targets: &[Some(wgpu::ColorTargetState {
                 format: color_format,
-                blend: Some(wgpu::BlendState {
-                    alpha: wgpu::BlendComponent::REPLACE,
-                    color: wgpu::BlendComponent::REPLACE,
+                // blend: Some(wgpu::BlendState {
+                //     alpha: wgpu::BlendComponent::REPLACE,
+                //     color: wgpu::BlendComponent::REPLACE,
+                // }),
+                blend:  Some(wgpu::BlendState{
+                    color: {
+                        wgpu::BlendComponent{
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::OneMinusDstAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        }
+                    },
+                    alpha:  {
+                        wgpu::BlendComponent{
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::OneMinusDstAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        }
+                    },
                 }),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
@@ -293,20 +300,22 @@ impl State {
         
         let mut surface_format = surface_caps.formats.iter()
             .copied()
-            .find(|f| f.is_srgb())
+            .find(|f| *f == TextureFormat::Rgba8UnormSrgb)
             .unwrap_or(surface_caps.formats[0]);
         if use_hdr{
             surface_format = TextureFormat::Rgba16Float;
+        } else {
+            surface_format = TextureFormat::Rgba8UnormSrgb;
         }
         println!("{:?}", surface_format);
         
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             format: surface_format,
             width: size.width,
             height: size.height,
-            present_mode: wgpu::PresentMode::Immediate,//surface_caps.present_modes[2],
-            alpha_mode: surface_caps.alpha_modes[0],
+            present_mode: wgpu::PresentMode::AutoVsync,//surface_caps.present_modes[2],
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
             view_formats: vec![surface_format],
         };
         surface.configure(&device, &config);
@@ -356,7 +365,7 @@ impl State {
         
         let camera_controller = camera::CameraController::new(300.0, 0.4);
 
-        let mut camera_uniform = CameraUniform::new();
+        let mut camera_uniform = camera::CameraUniform::new();
         camera_uniform.update_view_proj(&camera, &projection);
 
         let camera_buffer = device.create_buffer_init(
@@ -482,7 +491,7 @@ impl State {
         
         let point_light_buffer = init_new_point_lights_buffer(point_light_data, &device);
 
-        let directional_light = light::DirectionalLight::new([-0.1, -1.0, -0.225], [1.0,1.0,1.0]);
+        let directional_light = light::DirectionalLight::new([-0.0, -1.0, -0.0], [1.0,1.0,1.0]);
 
         
         let directional_light_uniform = directional_light.generate_directional_light_data();
@@ -559,7 +568,7 @@ impl State {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format:wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC ,
             view_formats: &[],
         });
 
@@ -987,7 +996,7 @@ impl State {
         models.push(obj_model);
         //movable_model_counts +=1;
         let mut rng = rand::rng();
-        let instances_num = 10;
+        let instances_num = 1000;
         for i in 1..=0 {
         let test_mesh = resources::load_model("default_cube.obj",
                 "opengl".to_string(), 
@@ -1002,7 +1011,8 @@ impl State {
         println!("total movable model/object : {:?}",movable_model_counts*instances_num);
         
         let mut render_output_mode = RenderOutputMode::LitWithShadow;
-
+        let mut left_mouse_pressed = false;
+        let debug_mode_texture = DebugTexture::DepthTexture;
 
         Self {
             free_cam,
@@ -1051,10 +1061,14 @@ impl State {
             debug_indices,
             debug_vert,
             mouse_pressed: false,
+            mouse_x: 0,
+            mouse_y: 0,
+            left_mouse_pressed,
             //single point light to be removed after implementing movable light controller with ability to control each light in Vec<Light>
             movable_light,
             movable_light_controller,
-            render_output_mode
+            render_output_mode,
+            debug_mode_texture,
         }
     }
 
@@ -1083,7 +1097,7 @@ impl State {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Depth32Float,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
                 view_formats: &[],
             });
             self.depth_view = self.depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1119,32 +1133,111 @@ impl State {
             } => {  
                     self.movable_light_controller.process_keyboard(*key, *state);
                     self.camera_controller.process_keyboard(*key, *state);
+                    match *key {
+                        VirtualKeyCode::Tab if *state == ElementState::Released => {
+                                match self.render_output_mode {
+                                    RenderOutputMode::Unlit => {self.render_output_mode = RenderOutputMode::Lit; true}
+                                    RenderOutputMode::Lit => {self.render_output_mode = RenderOutputMode::LitWithShadow; true}
+                                    RenderOutputMode::LitWithShadow => {self.render_output_mode = RenderOutputMode::Wireframe; true}
+                                    RenderOutputMode::Wireframe => {self.render_output_mode = RenderOutputMode::DebugLitWithShadow; true}
+                                    RenderOutputMode::DebugLitWithShadow => {self.render_output_mode = RenderOutputMode::Unlit; true}
+                                } 
+                            }
 
-                    //handle render mode switching, to redo
-                    if *key == VirtualKeyCode::Tab && *state == ElementState::Released {
-                       match self.render_output_mode {
-                            RenderOutputMode::Unlit => {self.render_output_mode = RenderOutputMode::Lit; true}
-                            RenderOutputMode::Lit => {self.render_output_mode = RenderOutputMode::LitWithShadow; true}
-                            RenderOutputMode::LitWithShadow => {self.render_output_mode = RenderOutputMode::Wireframe; true}
-                            RenderOutputMode::Wireframe => {self.render_output_mode = RenderOutputMode::DebugLitWithShadow; true}
-                            RenderOutputMode::DebugLitWithShadow => {self.render_output_mode = RenderOutputMode::Unlit; true}
-                        } 
-                    } else if *key == VirtualKeyCode::F11 && *state == ElementState::Released {
-                        println!("updating window mode");
-                        match self.window_mode {
-                            WindowMode::Fullscreen => {
-                                self.window.set_fullscreen(None);
-                                self.window_mode = WindowMode::Windowed;
-                                true
+                        VirtualKeyCode::F11 if *state == ElementState::Released => {
+                                println!("updating window mode");
+                                match self.window_mode {
+                                    WindowMode::Fullscreen => {
+                                        self.window.set_fullscreen(None);
+                                        self.window_mode = WindowMode::Windowed;
+                                        self.window.set_cursor_grab(window::CursorGrabMode::Confined);
+                                        true
+                                    }
+                                    WindowMode::Windowed => {
+                                        self.window.set_fullscreen(Some(Fullscreen::Borderless(None)));
+                                        self.window_mode = WindowMode::Fullscreen;
+                                        self.window.set_cursor_grab(window::CursorGrabMode::Locked);
+                                        true
+                                    }
+                                }
                             }
-                            WindowMode::Windowed => {
-                                self.window.set_fullscreen(Some(Fullscreen::Borderless(None)));
-                                self.window_mode = WindowMode::Fullscreen;
-                                true
+                        
+                        VirtualKeyCode::Key1 if *state == ElementState::Released => {
+                                match self.debug_mode_texture {
+                                    DebugTexture::DepthTexture => {
+                                            self.debug_mode_texture = DebugTexture::ShadowTexture;
+
+                                            self.debug_pass_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor{
+                                                label:Some("Debug Pass Bind Group"),
+                                                layout: &self.debug_depth_bind_group_layout,
+                                                entries: &[
+                                                    //depth texture
+                                                    wgpu::BindGroupEntry {
+                                                        binding: 0,
+                                                        resource: wgpu::BindingResource::TextureView(&self.shadow_texture_view)
+                                                    },
+                                                    //depth samplers
+                                                    wgpu::BindGroupEntry {
+                                                        binding: 1,
+                                                        resource: wgpu::BindingResource::Sampler(&self.depth_sampler),
+                                                    }
+                                                ]
+                                            });
+                                            true
+                                        },
+
+                                    DebugTexture::ShadowTexture => {
+                                            self.debug_mode_texture = DebugTexture::DepthTexture;
+                                            self.debug_pass_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor{
+                                                label:Some("Debug Pass Bind Group"),
+                                                layout: &self.debug_depth_bind_group_layout,
+                                                entries: &[
+                                                    //depth texture
+                                                    wgpu::BindGroupEntry {
+                                                        binding: 0,
+                                                        resource: wgpu::BindingResource::TextureView(&self.depth_view)
+                                                    },
+                                                    //depth samplers
+                                                    wgpu::BindGroupEntry {
+                                                        binding: 1,
+                                                        resource: wgpu::BindingResource::Sampler(&self.depth_sampler),
+                                                    }
+                                                ]
+                                            });
+                                            true
+                                        },
+                                }
                             }
+                        
+                        VirtualKeyCode::Key2 if *state == ElementState::Pressed && self.directional_light.distance > -3000.0 => {
+                            self.directional_light.distance -= 10.0;
+                            self.directional_light.shadow_scene_size = self.directional_light.distance.abs() * 1.5;
+                            println!("{:?}, {:?}",self.directional_light.distance, self.directional_light.shadow_scene_size);
+                            true
                         }
-                    } else {
-                        false
+                        VirtualKeyCode::Key3 if *state == ElementState::Pressed && self.directional_light.distance < -100.0 => {
+                            self.directional_light.distance += 10.0;
+                            self.directional_light.shadow_scene_size = self.directional_light.distance.abs() * 1.5;
+                            println!("{:?}, {:?}",self.directional_light.distance, self.directional_light.shadow_scene_size);
+                            true
+                        }
+                        VirtualKeyCode::R if *state == ElementState::Pressed => {
+                            self.directional_light.rotate_light(4.0, 0.0, 0.0);
+                            println!("rotating directional light.x, {:?}", self.directional_light.light_direction);
+                            true
+                        }
+                        VirtualKeyCode::T if *state == ElementState::Pressed => {
+                            self.directional_light.rotate_light(0.0, 4.0, 0.0);
+                            println!("rotation directional light.y, {:?}", self.directional_light.light_direction);
+                            true
+                        }
+                        VirtualKeyCode::Y if *state == ElementState::Pressed => {
+                            self.directional_light.rotate_light(0.0, 0.0, 4.0);
+                            println!("rotation directional light.z, {:?}", self.directional_light.light_direction);
+                            true
+                        }
+
+                        _ => {false}
                     }
                     
                 }
@@ -1152,8 +1245,16 @@ impl State {
                 self.camera_controller.process_scroll(delta);
                 true
             }
-            WindowEvent::MouseInput { button: MouseButton::Right, state, .. } => {
+            WindowEvent::MouseInput { 
+                button: MouseButton::Right, state, .. } => {
                 self.mouse_pressed = *state == ElementState::Pressed;
+                true
+            }
+            WindowEvent::MouseInput { 
+                button: MouseButton::Left, state, .. } => {
+                if(*state == ElementState::Pressed){
+                self.left_mouse_pressed = true;
+                }
                 true
             }
             _ => false,
@@ -1165,6 +1266,8 @@ impl State {
         self.camera_controller.update_camera(&mut self.camera, dt);
         self.movable_light_controller.update_light(&mut self.movable_light, &mut self.light_uniform, dt);
         self.camera_uniform.update_view_proj(&self.camera, &self.projection);
+        //self.directional_light.rotate_light((4.0 * dt.as_secs_f32()), (10.0 * dt.as_secs_f32()), 0.0);
+        self.directional_light_uniform_data = self.directional_light.generate_directional_light_data();
         
         
         
@@ -1172,7 +1275,7 @@ impl State {
 
         if self.models.len() > 1{
             ///// test moving models, will be ignored when model len() !>1 ///
-            debug!("chunking model update()");
+            println!("chunking model update()");
             let chunk_size_f = self.models.len().to_f32().unwrap()/8.0;
             let chunk_size = chunk_size_f.ceil().to_usize().unwrap();
             let model_chunks = self.models
@@ -1194,7 +1297,7 @@ impl State {
             let mut modelpos_chunk_5: Vec<Vector3<f32>> = vec![];
             let mut modelpos_chunk_6: Vec<Vector3<f32>> = vec![];
             let mut modelpos_chunk_7: Vec<Vector3<f32>> = vec![];
-            debug!("chunking position of models");
+            println!("chunking position of models");
             if !model_chunk_0.is_empty(){
                 
                 for model in model_chunk_0{
@@ -1275,7 +1378,7 @@ impl State {
                 None => {} 
             }
             
-            debug!("generating channels");
+            println!("generating channels");
             let mut pos: Arc<Mutex<Vec<Vector3<f32>>>>= Arc::new(Mutex::new(vec![]));
             let (tx_0 ,rx_0): (SyncSender<Vec<Vector3<f32>>>, Receiver<Vec<Vector3<f32>>> ) = mpsc::sync_channel(1);
             let (tx_1 ,rx_1): (SyncSender<Vec<Vector3<f32>>>, Receiver<Vec<Vector3<f32>>> ) = mpsc::sync_channel(1);
@@ -1285,7 +1388,7 @@ impl State {
             let (tx_5 ,rx_5): (SyncSender<Vec<Vector3<f32>>>, Receiver<Vec<Vector3<f32>>> ) = mpsc::sync_channel(1);
             let (tx_6 ,rx_6): (SyncSender<Vec<Vector3<f32>>>, Receiver<Vec<Vector3<f32>>> ) = mpsc::sync_channel(1);
             let (tx_7 ,rx_7): (SyncSender<Vec<Vector3<f32>>>, Receiver<Vec<Vector3<f32>>> ) = mpsc::sync_channel(1);
-            debug!("spawning t_0");
+            println!("spawning t_0");
             let t_0 = std::thread::spawn(move || {
                 let mut l_pos: Vec<Vector3<f32>> = vec![];
                 for i in 0..modelpos_chunk_0.len(){
@@ -1293,7 +1396,7 @@ impl State {
                 }
                 let mut sent = false;
                 while !sent {
-                    debug!("sending new pos : pos len() = {:?}", l_pos.len());
+                    println!("sending new pos : pos len() = {:?}", l_pos.len());
                     let res =tx_0.send(l_pos.clone());
                     match res {
                         Ok(_) => {sent = true}
@@ -1301,7 +1404,7 @@ impl State {
                     }
                 }
             });
-            debug!("spawning t_1");
+            println!("spawning t_1");
             let t_1 = std::thread::spawn(move || {
                 let mut l_pos: Vec<Vector3<f32>> = vec![];
                 for i in 0..modelpos_chunk_1.len(){
@@ -1309,7 +1412,7 @@ impl State {
                 }
                 let mut sent = false;
                 while !sent {
-                    debug!("sending new pos : pos len() = {:?}", l_pos.len());
+                    println!("sending new pos : pos len() = {:?}", l_pos.len());
                     let res = tx_1.send(l_pos.clone());
                     match res {
                         Ok(_) => {sent = true}
@@ -1317,7 +1420,7 @@ impl State {
                     }
                 }
             });
-            debug!("spawning t_2");
+            println!("spawning t_2");
             let t_2 = std::thread::spawn(move || {
                 let mut l_pos: Vec<Vector3<f32>> = vec![];
                 for i in 0..modelpos_chunk_2.len(){
@@ -1325,7 +1428,7 @@ impl State {
                 }
                 let mut sent = false;
                 while !sent {
-                    debug!("sending new pos : pos len() = {:?}", l_pos.len());
+                    println!("sending new pos : pos len() = {:?}", l_pos.len());
                     let res = tx_2.send(l_pos.clone());
                     match res {
                         Ok(_) => {sent = true}
@@ -1333,7 +1436,7 @@ impl State {
                     }
                 }
             });
-            debug!("spawning t_3");
+            println!("spawning t_3");
             let t_3 = std::thread::spawn(move || {
                 let mut l_pos: Vec<Vector3<f32>> = vec![];
                 for i in 0..modelpos_chunk_3.len(){
@@ -1341,7 +1444,7 @@ impl State {
                 }
                 let mut sent = false;
                 while !sent {
-                    debug!("sending new pos : pos len() = {:?}", l_pos.len());
+                    println!("sending new pos : pos len() = {:?}", l_pos.len());
                     let res = tx_3.send(l_pos.clone());
                     match res {
                         Ok(_) => {sent = true}
@@ -1349,7 +1452,7 @@ impl State {
                     }
                 }
             });
-            debug!("spawning t_6");
+            println!("spawning t_6");
             let t_4 = std::thread::spawn(move || {
                 let mut l_pos: Vec<Vector3<f32>> = vec![];
                 for i in 0..modelpos_chunk_4.len(){
@@ -1357,7 +1460,7 @@ impl State {
                 }
                 let mut sent = false;
                 while !sent {
-                    debug!("sending new pos : pos len() = {:?}", l_pos.len());
+                    println!("sending new pos : pos len() = {:?}", l_pos.len());
                     let res = tx_4.send(l_pos.clone());
                     match res {
                         Ok(_) => {sent = true}
@@ -1365,7 +1468,7 @@ impl State {
                     }
                 }
             });
-            debug!("spawning t_6");
+            println!("spawning t_6");
             let t_5 = std::thread::spawn(move || {
                 let mut l_pos: Vec<Vector3<f32>> = vec![];
                 for i in 0..modelpos_chunk_5.len(){
@@ -1373,7 +1476,7 @@ impl State {
                 }
                 let mut sent = false;
                 while !sent {
-                    debug!("sending new pos : pos len() = {:?}", l_pos.len());
+                    println!("sending new pos : pos len() = {:?}", l_pos.len());
                     let res = tx_5.send(l_pos.clone());
                     match res {
                         Ok(_) => {sent = true}
@@ -1381,7 +1484,7 @@ impl State {
                     }
                 }
             });
-            debug!("spawning t_6");
+            println!("spawning t_6");
             let t_6 = std::thread::spawn(move || {
                 let mut l_pos: Vec<Vector3<f32>> = vec![];
                 for i in 0..modelpos_chunk_6.len(){
@@ -1389,7 +1492,7 @@ impl State {
                 }
                 let mut sent = false;
                 while !sent {
-                    debug!("sending new pos : pos len() = {:?}", l_pos.len());
+                    println!("sending new pos : pos len() = {:?}", l_pos.len());
                     let res = tx_6.send(l_pos.clone());
                     match res {
                         Ok(_) => {sent = true}
@@ -1397,7 +1500,7 @@ impl State {
                     }
                 }
             });
-            debug!("spawning t_7");
+            println!("spawning t_7");
             let t_7 = std::thread::spawn(move || {
                 let mut l_pos: Vec<Vector3<f32>> = vec![];
                 for i in 0..modelpos_chunk_7.len(){
@@ -1405,7 +1508,7 @@ impl State {
                 }
                 let mut sent = false;
                 while !sent {
-                    debug!("sending new pos : pos len() = {:?}", l_pos.len());
+                    println!("sending new pos : pos len() = {:?}", l_pos.len());
                     let res = tx_7.send(l_pos.clone());
                     match res {
                         Ok(_) => {sent = true}
@@ -1445,9 +1548,9 @@ impl State {
             //let newpos: Vec<Vector3<f32>> = (1..self.models.len()).into_par_iter().map(|i| model::test_move_model_vec3(self.models[i].instances[0].position , dt)).collect::<Vec<_>>();
             let mut newpos: Vec<Vector3<f32>> = vec![];
             newpos = pos.as_ref().lock().unwrap().clone();
-            debug!("self.models.len() : {:?}", self.models.len());
-            debug!("newpos.len() : {:?}", newpos.len());
-            debug!("pos.len() : {:?}", pos.lock().unwrap().len());
+            println!("self.models.len() : {:?}", self.models.len());
+            println!("newpos.len() : {:?}", newpos.len());
+            println!("pos.len() : {:?}", pos.lock().unwrap().len());
             // for i in 0..self.models.len(){
             //     self.models[i].instances[0].position = newpos[i]
             // }
@@ -1482,7 +1585,11 @@ impl State {
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
         let output = self.surface.get_current_texture()?;
 
-        let view = output.texture.create_view(&wgpu:: TextureViewDescriptor{format: Some(self.config.format),  ..Default::default()});
+        let view = output.texture.create_view(&wgpu:: TextureViewDescriptor{
+                format: Some(self.config.format), 
+                ..Default::default()
+            }
+        );
 
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Render Encoder"),
@@ -1490,7 +1597,7 @@ impl State {
 
         //shadow pass
         match self.render_output_mode{
-            RenderOutputMode::LitWithShadow => {
+            RenderOutputMode::LitWithShadow | RenderOutputMode::DebugLitWithShadow => {
                 let mut shadow_pass = Arc::new(Mutex::new(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("Shadow Pass"),
                     color_attachments: &[], // No color output
@@ -1663,20 +1770,27 @@ impl State {
         
         
         self.queue.submit(std::iter::once(encoder.finish()));
+
         output.present();
         Ok(())
     }
 
 }
 
-
+fn align_up(value: u32, alignment: u32) -> u32 {
+    (value + alignment - 1) / alignment * alignment
+}
 
 pub async fn run(file_path: String, file_type:String, fullscreen_mode: String, use_hdr: bool) {
-    env_logger::init();
-    
     let event_loop = EventLoop::new();
     let window_size: PhysicalSize<u32> = PhysicalSize { width: 1440, height: 1080 };
-    let window = WindowBuilder::new().with_inner_size(window_size).build(&event_loop).unwrap();
+    //let icon = get_icon();
+    let window = WindowBuilder::new()
+        .with_inner_size(window_size)
+        //.with_taskbar_icon(Some(icon.clone()))
+        //.with_window_icon(Some(icon))
+        .build(&event_loop)
+        .unwrap();
     let mut window_mode = WindowMode::Windowed;
     match fullscreen_mode.as_str() {
         "fullscreen" => {   
@@ -1691,6 +1805,7 @@ pub async fn run(file_path: String, file_type:String, fullscreen_mode: String, u
                             let mut mode = monitor.video_modes().nth(0).unwrap(); //next().expect("no mode found");
                             let fullscreen = Some(Fullscreen::Borderless(None)); //Some(Fullscreen::Exclusive(mode.clone()));
                             window.set_fullscreen(fullscreen);
+                            window.set_cursor_grab(window::CursorGrabMode::Locked);
 
         },
         "windowed" => println!("windowed mode"),
@@ -1704,12 +1819,17 @@ pub async fn run(file_path: String, file_type:String, fullscreen_mode: String, u
     let mut last_render_time = instant::Instant::now();
 
     event_loop.run(move | event, _, control_flow | {*control_flow = ControlFlow::Poll; match event {
-        Event::DeviceEvent { event: DeviceEvent::MouseMotion{delta,}, .. } => if state.mouse_pressed {
+        Event::DeviceEvent { event: DeviceEvent::MouseMotion{delta,}, .. } => {
+            match state.left_mouse_pressed{
+                true => {state.mouse_x = delta.0 as u32; state.mouse_y= delta.1 as u32;}
+                false => {}
+            }
+           if state.mouse_pressed {
             state.camera_controller.process_mouse(delta.0, delta.1)
-        } else {
-            state.camera_controller.process_mouse(delta.0, delta.1)
+            } else {
+                state.camera_controller.process_mouse(delta.0, delta.1)
+            } 
         }
-        
         
         Event::WindowEvent {
             ref event,
@@ -1725,12 +1845,24 @@ pub async fn run(file_path: String, file_type:String, fullscreen_mode: String, u
                         },
                         ..
                     } => *control_flow = ControlFlow::Exit,
-        
+                    
                     WindowEvent::Resized(physical_size) => {
                         state.resize(*physical_size);
                     }
                     WindowEvent::ScaleFactorChanged { new_inner_size, .. } => {
                         state.resize(**new_inner_size);
+                    }
+
+                    WindowEvent::DroppedFile(file_path) => {
+                        println!("File Dropped, File Path: {:?}", file_path)
+                    }
+
+                    WindowEvent::HoveredFile(file_path) => {
+                        println!("Hovered File, File Path: {:?}", file_path)
+                    }
+                    
+                    WindowEvent::HoveredFileCancelled => {
+                        println!("Hovered File Cancelled")
                     }
         
                     _ => {}

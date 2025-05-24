@@ -1771,6 +1771,216 @@ impl State {
         
         self.queue.submit(std::iter::once(encoder.finish()));
 
+        
+        //experiment with picking value from texture
+        //todo color id pass
+        self.device.poll(wgpu::Maintain::Wait);
+         
+        if self.left_mouse_pressed {
+            self.left_mouse_pressed = false;
+            use wgpu::BufferDescriptor;
+            let start = instant::Instant::now();
+
+            let bytes_per_row = self.depth_texture.width() * 4;
+            let aligned_bytes_per_row = align_up(bytes_per_row, wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+            let temp_buffer_size = (aligned_bytes_per_row as u64 * self.depth_texture.height() as u64) as BufferAddress;
+            let temp_buffer = Arc::new(Mutex::new(self.device.create_buffer(&BufferDescriptor { 
+                label: Some("Temp Picking Buffer"), 
+                size: temp_buffer_size, 
+                usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ, 
+                mapped_at_creation: false, 
+            }))); 
+            let temp_write_buffer = self.device.create_buffer(&BufferDescriptor { 
+                label: Some("Temp Write Picking Buffer"), 
+                size: temp_buffer_size, 
+                usage: BufferUsages::COPY_SRC | BufferUsages::MAP_WRITE, 
+                mapped_at_creation: false, 
+            }); 
+            use wgpu::CommandEncoderDescriptor;
+            let mut encoder = self.device.create_command_encoder(&CommandEncoderDescriptor { 
+                label: Some("texture_copy_encoder") 
+            });
+
+            
+
+            encoder.copy_texture_to_buffer(
+                ImageCopyTexture{
+                    texture: &self.depth_texture,
+                    mip_level: 0,
+                    origin: Origin3d {  //coordinate of the pixel to read
+                        x: 0,
+                        y: 0,
+                        z: 0,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                }, 
+                ImageCopyBuffer{
+                    buffer: &temp_buffer.lock().unwrap(),
+                    layout: ImageDataLayout{
+                        offset: 0,
+                        bytes_per_row: Some(aligned_bytes_per_row), //4bytes per pixel
+                        rows_per_image: Some(self.depth_texture.height()),    // 1 row for each individual pixel
+                    },
+                }, 
+                Extent3d {
+                    width: self.depth_texture.width(), //read 1 pixel
+                    height: self.depth_texture.height(),
+                    depth_or_array_layers: 1,
+                });
+
+                self.queue.submit(std::iter::once(encoder.finish()));
+                self.device.poll(wgpu::Maintain::Wait);
+                let texture_width = self.depth_texture.width().clone();
+                let mut done = Arc::new(Mutex::new(false));
+                let done2 = Arc::clone(&done);
+                let temp_buffer2 = Arc::clone(&temp_buffer);
+                let (x, y) = (self.mouse_x, self.mouse_y);
+                let buffer_f = temp_buffer.lock().unwrap().slice(..).map_async(wgpu::MapMode::Read,  move |result| {
+                    match result {
+                       Ok(()) => {
+                            let mut g = done2.lock().unwrap();
+                            *g = true;
+                            let buf = temp_buffer2.lock().unwrap();
+                            let data = buf.slice(..).get_mapped_range();
+                            
+                            //read Float32Depth texture pixel color/depth value at mouse coord
+                            let pixels: &[f32] = bytemuck::cast_slice(&data);
+                            let pixel_index = ((x + y * texture_width)*4) as usize;
+                            let depth_value: f32 = pixels[pixel_index];
+
+                            ////
+                            //read rgba32float texture pixel color at mouse coord
+                            // Calculate the index
+                            //let index = ((x * texture_width + x) * 4) as usize;
+
+                            // Get the RGBA color
+                            // let r = pixels[index];
+                            // let g = pixels[index + 1];
+                            // let b = pixels[index + 2];
+                            // let a = pixels[index + 3];
+                            // let rgba_color = vec4(r, g, b, a);
+                            // then find model in self.models with matching color id
+                            /// 
+                            let near = 0.1;
+                            let far = 10000.0;
+
+                            let linear_depth = near * far / (far - depth_value * ( far - near ));
+                            let normalized_depth = linear_depth / far;
+
+                            drop(data);
+                            println!("Clicked Pixel Color {:?}",normalized_depth);
+                            buf.unmap();
+                        }
+                        Err(e) => {
+                            println!("Buffer Mapping flailed: {:?}", e);
+                        }
+                    }
+                }); 
+                self.device.poll(wgpu::Maintain::Wait);
+                while !*done.lock().unwrap(){
+                    //print!("waiting for gpu callback")
+                }
+                if *done.lock().unwrap() {
+                    {
+                        println!("done");
+                    }
+                    
+                    let duration = instant::Instant::now() - start;
+                    println!("Reading Selection took : {:?} sec", duration.as_secs_f32());
+                }
+                let texture_width = self.depth_texture.width().clone();
+
+                let duration = instant::Instant::now() - start;
+                println!("Reading Selection took : {:?} sec", duration.as_secs_f32());
+        };
+        
+
+        //experiment with saving render output to png, currently very slow on res > 720p,  saving to texture took too long 
+        let sc_time_start = instant::Instant::now();
+        // Step 2: Copy the texture to the buffer
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    
+        let output_bytes_per_row = output.texture.width() * 4;
+        let output_aligned_bytes_per_row = align_up(output_bytes_per_row, wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+
+        //test copy surface texture to a jpeg file
+        let buffer_size = output_aligned_bytes_per_row * output.texture.height();
+        let readback_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            size: buffer_size as u64,
+            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+            label: Some("Read back buffer")
+        });
+        
+
+        encoder.copy_texture_to_buffer(
+            output.texture.as_image_copy(),
+            ImageCopyBuffer{
+                    buffer: &readback_buffer,
+                    layout: ImageDataLayout{
+                        offset: 0,
+                        bytes_per_row: Some(output_aligned_bytes_per_row), //4bytes per pixel
+                        rows_per_image: Some(output.texture.height()),    // 1 row for each individual pixel
+                    },
+                }, 
+            
+            wgpu::Extent3d{
+                width: output.texture.width(),
+                height: output.texture.height(),
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(std::iter::once(encoder.finish()));
+        self.device.poll(wgpu::Maintain::Wait);
+        let buffer_slice =  readback_buffer.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+            sender.send(result).unwrap();
+        });
+        self.device.poll(wgpu::Maintain::Wait);
+        while receiver.try_recv().is_err() {
+            self.device.poll(wgpu::Maintain::Wait);
+        }
+        let duration = instant::Instant::now() - sc_time_start;
+        println!("gpu --->  cpu buffer took : {:?} sec", duration.as_secs_f32());
+        
+        let mapped = buffer_slice.get_mapped_range();
+        let data = mapped[..].to_vec();
+
+        // Convert BGRA to RGBA
+        //let mut rgba_data = Vec::with_capacity(data.len());
+        // for chunk in data.chunks_exact(4) {
+        //     rgba_data.extend_from_slice(&[chunk[0], chunk[1], chunk[2], chunk[3]]);
+        // }
+        let image: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::from_raw(
+            output.texture.width(), 
+            output.texture.height(), 
+            data
+        ).expect("Failed to create image buffer");
+        // Get the temporary directory path
+        let temp_dir = env::temp_dir();
+        println!("Temp Path : {:?}", temp_dir);
+        let file_name = "screenshot.png";
+        let file_path = temp_dir.join(file_name);
+        
+        let file_res = File::create(file_path);
+        let mut file;
+        match file_res {
+            Ok(f) => {
+                file = f;
+                let mut writer = BufWriter::new(file);
+                let res = image.write_to(&mut writer, image::ImageOutputFormat::Png);
+                match res {
+                    Ok(_) => {println!("success")},
+                    Err(err) => {println!("err : {:?}", err)},
+                }
+            },
+            Err(err) => {println!("error creating file : {:?}", err)},
+        }
+        let duration = instant::Instant::now() - sc_time_start;
+        println!("Saving Screenshot took : {:?} sec", duration.as_secs_f32());
+        
+
         output.present();
         Ok(())
     }

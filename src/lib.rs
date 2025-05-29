@@ -7,8 +7,10 @@ mod resources;
 mod camera;
 mod light;
 mod deferredRenderPipeline;
+mod frametime;
 
 use bytemuck::{cast_slice, Contiguous};
+use frametime::FrameTimeGraphRaw;
 use image::{buffer, ImageBuffer, Rgba};
 use instant::now;
 use light::{init_new_directional_lights_Uniform, init_new_point_lights_buffer, DirectionalLight, DirectionalLightUniformData, PointLightData};
@@ -126,6 +128,9 @@ struct State {
     mouse_y: u32,
     render_output_mode: RenderOutputMode,
     debug_mode_texture: DebugTexture,
+    frame_time_graph: frametime::FrameTimeGraph,
+    frametime_vertex_buffer: wgpu::Buffer,
+    frame_time_render_pipeline: RenderPipeline,
 }
 
 fn create_render_pipeline(
@@ -491,7 +496,7 @@ impl State {
         
         let point_light_buffer = init_new_point_lights_buffer(point_light_data, &device);
 
-        let directional_light = light::DirectionalLight::new([-0.0, -1.0, -0.0], [1.0,1.0,1.0]);
+        let directional_light = light::DirectionalLight::new([0.0, -0.9902682, -0.1391731], [1.0,1.0,1.0]);
 
         
         let directional_light_uniform = directional_light.generate_directional_light_data();
@@ -1014,6 +1019,67 @@ impl State {
         let mut left_mouse_pressed = false;
         let debug_mode_texture = DebugTexture::DepthTexture;
 
+        let max_points = std::mem::size_of::<FrameTimeGraphRaw>() as u64;
+        let frametime_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            size: max_points,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST ,
+            label: Some("Frame Graph Buffer"),
+            mapped_at_creation: false,
+        });
+        let mut frame_time_graph = frametime::FrameTimeGraph::new();
+
+        let frame_time_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { 
+            label: Some("Frame Time Shader") , 
+            source: wgpu::ShaderSource::Wgsl(include_str!("frametime.wgsl").into()), 
+        });
+
+        let frame_time_vertex_buffer_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<[f32; 2]>() as u64, // 8 bytes per vertex
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x2, // Each vertex is a vec2<f32>
+                    offset: 0,
+                    shader_location: 0,
+                },
+            ],
+        };
+
+        let frame_time_render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor{
+            label: Some("Frame Graph Overlay Pipeline"),
+                layout: None,
+                vertex: wgpu::VertexState {
+                    module: &frame_time_shader,
+                    entry_point: "vs_main",
+                    buffers: &[frame_time_vertex_buffer_layout],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &frame_time_shader,
+                    entry_point: "fs_main",
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::LineStrip,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState {
+                    count: 1,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+            multiview: None,
+        });
+
         Self {
             free_cam,
             window,
@@ -1069,6 +1135,9 @@ impl State {
             movable_light_controller,
             render_output_mode,
             debug_mode_texture,
+            frame_time_graph,
+            frametime_vertex_buffer,
+            frame_time_render_pipeline
         }
     }
 
@@ -1161,6 +1230,39 @@ impl State {
                                     }
                                 }
                             }
+                        VirtualKeyCode::F1 if *state == ElementState::Released => {
+                            match self.config.present_mode {
+                                wgpu::PresentMode::AutoVsync => {
+                                    self.config.present_mode = wgpu::PresentMode::AutoNoVsync; 
+                                    self.surface.configure(&self.device, &self.config);
+                                    true
+                                },
+                                wgpu::PresentMode::AutoNoVsync => {
+                                    self.config.present_mode = wgpu::PresentMode::Fifo;
+                                    self.surface.configure(&self.device, &self.config);
+                                    true
+                                },
+                                wgpu::PresentMode::Fifo => {
+                                    self.config.present_mode = wgpu::PresentMode::Immediate;
+                                    self.surface.configure(&self.device, &self.config);
+                                    true
+                                },
+                                wgpu::PresentMode::FifoRelaxed => {
+                                    self.config.present_mode = wgpu::PresentMode::Immediate;
+                                    self.surface.configure(&self.device, &self.config);
+                                    true},
+                                wgpu::PresentMode::Immediate => {
+                                    self.config.present_mode = wgpu::PresentMode::AutoVsync;
+                                    self.surface.configure(&self.device, &self.config);
+                                    true
+                                },
+                                wgpu::PresentMode::Mailbox => {
+                                    self.config.present_mode = wgpu::PresentMode::AutoVsync;
+                                    self.surface.configure(&self.device, &self.config);
+                                    true
+                                },
+                            }
+                        }
                         
                         VirtualKeyCode::Key1 if *state == ElementState::Released => {
                                 match self.debug_mode_texture {
@@ -1263,6 +1365,7 @@ impl State {
 
 
     fn update(&mut self, dt: instant::Duration) {
+        self.frame_time_graph.update(dt);
         self.camera_controller.update_camera(&mut self.camera, dt);
         self.movable_light_controller.update_light(&mut self.movable_light, &mut self.light_uniform, dt);
         self.camera_uniform.update_view_proj(&self.camera, &self.projection);
@@ -1571,9 +1674,13 @@ impl State {
             }
         }
 
+        // Generate vertices
+        let frametime_vertices = self.frame_time_graph.get_vertices(self.window.inner_size().width as f32, self.window.inner_size().height as f32);
+
+        // Write to vertex buffer
         
         /////////
-        
+        self.queue.write_buffer(&self.frametime_vertex_buffer, 0, bytemuck::cast_slice(&[frametime_vertices]));
         
         self.queue.write_buffer(&self.camera_buffer, 0,bytemuck::cast_slice(&[self.camera_uniform]));
         
@@ -1767,7 +1874,29 @@ impl State {
                 }
         }
 
-        
+        //frame time graph pass
+        match self.render_output_mode {
+            RenderOutputMode::DebugLitWithShadow => {
+                let mut frame_time_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor{
+                    label: Some("Frame Time Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: true,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                });
+
+                frame_time_pass.set_pipeline(&self.frame_time_render_pipeline);
+                frame_time_pass.set_vertex_buffer(0, self.frametime_vertex_buffer.slice(..));
+                frame_time_pass.draw(0..256 as u32, 0..1 as u32);
+            }
+
+            _ => {}
+        }
         
         self.queue.submit(std::iter::once(encoder.finish()));
 
@@ -1895,90 +2024,6 @@ impl State {
         };
         
 
-        //experiment with saving render output to png, currently very slow on res > 720p,  saving to texture took too long 
-        let sc_time_start = instant::Instant::now();
-        // Step 2: Copy the texture to the buffer
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-    
-        let output_bytes_per_row = output.texture.width() * 4;
-        let output_aligned_bytes_per_row = align_up(output_bytes_per_row, wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
-
-        //test copy surface texture to a jpeg file
-        let buffer_size = output_aligned_bytes_per_row * output.texture.height();
-        let readback_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            size: buffer_size as u64,
-            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-            label: Some("Read back buffer")
-        });
-        
-
-        encoder.copy_texture_to_buffer(
-            output.texture.as_image_copy(),
-            ImageCopyBuffer{
-                    buffer: &readback_buffer,
-                    layout: ImageDataLayout{
-                        offset: 0,
-                        bytes_per_row: Some(output_aligned_bytes_per_row), //4bytes per pixel
-                        rows_per_image: Some(output.texture.height()),    // 1 row for each individual pixel
-                    },
-                }, 
-            
-            wgpu::Extent3d{
-                width: output.texture.width(),
-                height: output.texture.height(),
-                depth_or_array_layers: 1,
-            },
-        );
-        self.queue.submit(std::iter::once(encoder.finish()));
-        self.device.poll(wgpu::Maintain::Wait);
-        let buffer_slice =  readback_buffer.slice(..);
-        let (sender, receiver) = std::sync::mpsc::channel();
-        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-            sender.send(result).unwrap();
-        });
-        self.device.poll(wgpu::Maintain::Wait);
-        while receiver.try_recv().is_err() {
-            self.device.poll(wgpu::Maintain::Wait);
-        }
-        let duration = instant::Instant::now() - sc_time_start;
-        println!("gpu --->  cpu buffer took : {:?} sec", duration.as_secs_f32());
-        
-        let mapped = buffer_slice.get_mapped_range();
-        let data = mapped[..].to_vec();
-
-        // Convert BGRA to RGBA
-        //let mut rgba_data = Vec::with_capacity(data.len());
-        // for chunk in data.chunks_exact(4) {
-        //     rgba_data.extend_from_slice(&[chunk[0], chunk[1], chunk[2], chunk[3]]);
-        // }
-        let image: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::from_raw(
-            output.texture.width(), 
-            output.texture.height(), 
-            data
-        ).expect("Failed to create image buffer");
-        // Get the temporary directory path
-        let temp_dir = env::temp_dir();
-        println!("Temp Path : {:?}", temp_dir);
-        let file_name = "screenshot.png";
-        let file_path = temp_dir.join(file_name);
-        
-        let file_res = File::create(file_path);
-        let mut file;
-        match file_res {
-            Ok(f) => {
-                file = f;
-                let mut writer = BufWriter::new(file);
-                let res = image.write_to(&mut writer, image::ImageOutputFormat::Png);
-                match res {
-                    Ok(_) => {println!("success")},
-                    Err(err) => {println!("err : {:?}", err)},
-                }
-            },
-            Err(err) => {println!("error creating file : {:?}", err)},
-        }
-        let duration = instant::Instant::now() - sc_time_start;
-        println!("Saving Screenshot took : {:?} sec", duration.as_secs_f32());
         
 
         output.present();
@@ -2082,7 +2127,7 @@ pub async fn run(file_path: String, file_type:String, fullscreen_mode: String, u
 
         Event::RedrawRequested(window_id) if window_id == state.window().id() => {
             let now = instant::Instant::now();
-            let dt = now - last_render_time;
+            let dt = last_render_time.elapsed();
             //let fps = 1000000/dt.as_micros();
             //println!("fps : {fps}");
             last_render_time = now;

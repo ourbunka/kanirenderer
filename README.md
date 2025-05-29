@@ -11,10 +11,11 @@ in /res directory, open terminal
 -currently support .obj file with png/jpeg textures,
 
 -switch between render modes with "Tab" key
-  -unlit
-  -lit
-  -lit with shadow
-  -wireframe
+  - unlit
+  - lit
+  - lit with shadow
+  - wireframe
+  - Debug
 
 -basic lighting (diffuse, specular and ambient light),
 
@@ -37,7 +38,7 @@ in /res directory, open terminal
   
   2)add kanirenderer.exe dir to your OS ENVIRONMENT "PATH" VARIABLE
   
-  3)in your obj file directory, open terminal, then enter "kanirenderer yourfilename.obj default windowed"
+  3)in your obj file directory, open terminal, then enter "kanirenderer yourfilename.obj opengl windowed"
 
 
 # Credit

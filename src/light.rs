@@ -81,7 +81,8 @@ impl DirectionalLight {
         let direction = self.light_direction;
         let color = self.color;
         //println!("light direction : {:?}", direction);
-        let light_dir = Point3::new(direction[0], direction[1], direction[2]);
+        let light_dir = Vector3::new(direction[0], direction[1], direction[2]).normalize();
+
         let light_pos = Point3::new(0.0, 0.0, 0.0);
         let light_target = Point3::new(
             (light_pos.x + (light_dir.x*self.distance)), 

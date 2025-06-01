@@ -22,11 +22,18 @@ use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterato
 use texture::Texture;
 use wgpu::{util::DeviceExt, BindGroup, BindGroupLayout, Buffer, BufferAddress, BufferSize, BufferUsages, DepthBiasState, Extent3d, ImageCopyBuffer, ImageCopyTexture, ImageDataLayout, Origin3d, PipelineLayout, RenderPipeline, Sampler, ShaderModule, TextureView};
 use winit::{
-    dpi::PhysicalSize, event::*, event_loop::{ControlFlow, EventLoop}, platform::windows::{WindowBuilderExtWindows, WindowExtWindows}, window::{self, Fullscreen, WindowBuilder}
+    dpi::PhysicalSize, event::*, event_loop::{ControlFlow, EventLoop}, window::{self, Fullscreen, WindowBuilder}
 };
 use winit::window::Window;
 use wgpu::TextureFormat;
 use crate::resources::*;
+
+#[cfg(windows)]
+use winit::{platform::windows::{WindowBuilderExtWindows, WindowExtWindows, IconExtWindows}};
+
+
+#[cfg(linux)]
+use winit::{platform::x11::{WindowExtX11}};
 
 
 #[repr(C)]
@@ -35,9 +42,9 @@ struct DebugVert {
     position: [f32;2],
 }
 
-use winit::platform::windows::IconExtWindows;
 use winit::window::Icon;
 
+#[cfg(windows)]
 fn load_icon(window: &Window){
     let icon_name = "icon.png";
     let img_rgba = image::open(icon_name).unwrap().to_rgba8().into_vec();
@@ -46,6 +53,7 @@ fn load_icon(window: &Window){
     window.set_taskbar_icon(Some(icon));
 }
 
+#[cfg(windows)]
 fn get_icon() -> Icon{
     let icon_name = "icon.png";
     let img_rgba = image::open(icon_name).unwrap().to_rgba8().into_vec();
@@ -273,8 +281,15 @@ impl State {
     async fn new(window: Window, file_path: String, file_type:String, use_hdr: bool, window_mode: WindowMode) -> Self {
         let free_cam = true;
         let size = window.inner_size();
+
+        #[cfg(windows)]
+        let default_backend = wgpu::Backends::DX12;
+
+        #[cfg(not(windows))]
+        let default_backend = wgpu::Backends::VULKAN;
+
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::DX12,
+            backends: default_backend,
             dx12_shader_compiler: Default::default(),
         });
 

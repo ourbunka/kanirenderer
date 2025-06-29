@@ -70,10 +70,10 @@ impl DirectionalLight {
     pub fn new(direction: [f32;3],color: [f32;3]) -> Self {
         Self {
             color: color,
-            distance: -2000.0,
+            distance: -8000.0,
             light_direction: direction,
             intensity:2.0,
-            shadow_scene_size: 3000.0,
+            shadow_scene_size: 11500.0,
         }
     }
 
@@ -88,6 +88,7 @@ impl DirectionalLight {
             (light_pos.x + (light_dir.x*self.distance)), 
             (light_pos.y + (light_dir.y*self.distance)), 
             (light_pos.z + (light_dir.z*self.distance))); 
+        
         let light_view = cgmath::Matrix4::look_at_rh(
             light_target, 
             light_pos,
@@ -97,7 +98,7 @@ impl DirectionalLight {
         let light_projection = cgmath::ortho(
             -shadow_size, shadow_size, 
             -shadow_size, shadow_size, 
-            -shadow_size, shadow_size);
+            -0.1, shadow_size);
         let light_view_projection = light_projection * light_view;
 
         DirectionalLightUniformData {

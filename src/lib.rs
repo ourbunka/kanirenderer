@@ -735,7 +735,7 @@ impl State {
             
         }
         
-        let shadow_texture_size = 2048;
+        let shadow_texture_size = 4096;
         let shadow_texture_size_extent3d = wgpu::Extent3d{
             width: shadow_texture_size,
             height: shadow_texture_size,
@@ -1326,13 +1326,13 @@ impl State {
                                 }
                             }
                         
-                        VirtualKeyCode::Key2 if *state == ElementState::Pressed && self.directional_light.distance > -3000.0 => {
+                        VirtualKeyCode::Key2 if *state == ElementState::Pressed && self.directional_light.distance > -10000.0 => {
                             self.directional_light.distance -= 10.0;
                             self.directional_light.shadow_scene_size = self.directional_light.distance.abs() * 1.5;
                             println!("{:?}, {:?}",self.directional_light.distance, self.directional_light.shadow_scene_size);
                             true
                         }
-                        VirtualKeyCode::Key3 if *state == ElementState::Pressed && self.directional_light.distance < -100.0 => {
+                        VirtualKeyCode::Key3 if *state == ElementState::Pressed && self.directional_light.distance < -2000.0 => {
                             self.directional_light.distance += 10.0;
                             self.directional_light.shadow_scene_size = self.directional_light.distance.abs() * 1.5;
                             println!("{:?}, {:?}",self.directional_light.distance, self.directional_light.shadow_scene_size);

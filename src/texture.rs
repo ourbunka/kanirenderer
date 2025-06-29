@@ -110,7 +110,7 @@ impl Texture {
             depth_or_array_layers: 1,
         };
 
-        let format = if is_normal_map{
+        let format = if is_normal_map {
             match img.color(){
                 image::ColorType::L8 => {wgpu::TextureFormat::Rgba8Unorm},
                 image::ColorType::La8 => {wgpu::TextureFormat::Rgba8Unorm},

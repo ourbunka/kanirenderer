@@ -63,32 +63,66 @@ pub struct Model {
     pub instances: Vec<Instance>,
     pub instance_buffer: wgpu::Buffer,
     pub instance_num: i32,
+    pub cast_shadow: bool,
 }
 
-impl Model {
-    pub fn test_move_model(posx: f32 , i :usize, dt: Duration) ->f32 {
-        let mut newpos = posx;
-        if i % 2 == 0{
-            newpos += (1.0_f32 * (&dt.as_millis().to_f32().unwrap()));  
-        } else {
-            newpos -= (1.0_f32 * (&dt.as_millis().to_f32().unwrap()));
-        }
-        if posx < -100.0 {
-            newpos = 100.0
-        }
-        if posx > 100.0 {
-            newpos = -100.0
-        }
-        newpos
-        //let instance_data = self.instances.iter().map(Instance::to_raw).collect::<Vec<_>>();    
+pub fn take_instances_data(models: &mut Vec<Model>) -> Vec<WorkingModel>{
+    let mut res = vec![];
+    for model in models {
+        let instances = std::mem::take(&mut model.instances);
+        #[cfg(debug_assertions)]
+        assert!(model.instances.is_empty(), "something went wrong in take_instances_data(), model.instances should be empty");
+        res.push(
+            WorkingModel { 
+                instances: instances
+            }
+        );
     }
+    res
 }
-pub fn test_move_model_vec3(vec_pos: Vector3<f32> , dt: Duration) ->Vector3<f32> {
-    let mut rng = rand::rng();
-    let newpos = vec_pos - (Vector3::new((rng.random_range(-10.0..10.0)), rng.random_range(-10.0..10.0), rng.random_range(-10.0..10.0)) * (dt.as_millis().to_f32().unwrap()));
-    newpos
-    //let instance_data = self.instances.iter().map(Instance::to_raw).collect::<Vec<_>>();    
 
+pub fn clone_instances_data(models: &Vec<Model>) -> Vec<WorkingModel>{
+    let mut res = vec![];
+    for model in models {
+        res.push(
+            WorkingModel { 
+                instances: model.instances.clone()
+            }
+        );
+    }
+    res
+}
+
+
+#[derive(Clone)]
+pub struct WorkingModel{
+    pub instances: Vec<Instance>
+}
+
+pub fn test_move_model(mut instance: Instance , dts: f32) -> Instance {
+    let mut rng = rand::rng();
+    instance.position = instance.position - (
+        Vector3::new(
+            rng.random_range(-10.0..10.), 
+            rng.random_range(-10.0..10.0), 
+            rng.random_range(-10.0..10.0)
+        ) * dts
+    );
+    let newrot = cgmath::Quaternion::from_axis_angle(
+        Vector3::new(1.0, 0.0, 0.0),
+        cgmath::Rad::from(cgmath::Deg(30.0 as f32 * dts))
+    );
+    instance.rotation = newrot * instance.rotation;
+    if instance.scale.x > 0.25 {
+        let random = rng.random_range(0.01..0.05) as f32 ;
+        let random_y = rng.random_range(0.01..0.05) as f32;
+        let random_z = rng.random_range(0.01..0.05) as f32;
+        instance.scale -= (Vector3::new(random, random_y, random_z) * dts)
+    } else {
+        instance.scale = Vector3::new(1.0, 1.0, 1.0)
+    }
+    
+    instance
 }
 
 
@@ -245,10 +279,11 @@ where
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct Instance {
     pub position: cgmath::Vector3<f32>,
     pub rotation: cgmath::Quaternion<f32>,
+    pub scale: cgmath::Vector3<f32>,
 }
 
 #[repr(C)]
@@ -260,23 +295,25 @@ pub struct InstanceRaw {
     pub _padding: u32,
 }
 
-pub fn update_instance_position_rotation(instances: &Instance, dt: Duration) -> Instance{
-    use rayon::prelude::*;
-    let new_pos = test_move_model_vec3(instances.position, dt);
-            
-    Instance { position: new_pos, rotation: instances.rotation }
-}
-
 impl Instance {
     pub fn to_raw(&self) -> InstanceRaw {
-        let model = cgmath::Matrix4::from_translation(self.position) * cgmath::Matrix4::from(self.rotation);
+        let model = cgmath::Matrix4::from_translation(self.position) * cgmath::Matrix4::from(self.rotation) * cgmath::Matrix4::from_nonuniform_scale(self.scale.x, self.scale.y, self.scale.z);
+        let normal_matrix = calculate_normal_matrix(self.rotation, self.scale);
         InstanceRaw { 
             model: model.into(),
-            normal: cgmath::Matrix3::from(self.rotation).into(),
+            normal: normal_matrix.into(), //cgmath::Matrix3::from(self.rotation).into(),
             _padding: 0,
         }
     }
     
+}
+
+fn calculate_normal_matrix(rot: cgmath::Quaternion<f32>, scale: cgmath::Vector3<f32>) -> cgmath::Matrix3<f32> {
+    let rotation_matrix = cgmath::Matrix3::from(rot);
+    let inverse_scale = Vector3::new(1.0/scale.x, 1.0/scale.y, 1.0/scale.z);
+    let scale_matrix = cgmath::Matrix3::from_nonuniform_scale(scale.x, scale.y);
+    let normal_matrix = rotation_matrix * scale_matrix;
+    normal_matrix
 }
 
 

@@ -14,19 +14,21 @@ use frametime::FrameTimeGraphRaw;
 use image::{buffer, ImageBuffer, Rgba};
 use instant::now;
 use light::{init_new_directional_lights_Uniform, init_new_point_lights_buffer, DirectionalLight, DirectionalLightUniformData, PointLightData};
-use model::{update_instance_position_rotation, DrawModel, Instance, Model, Vertex};
-use cgmath::{num_traits::ToPrimitive, perspective, prelude::*, vec4, Vector3};
+use model::{ DrawModel, Instance, Model, Vertex};
+use cgmath::{num_traits::ToPrimitive, perspective, prelude::*, vec3, vec4, Quaternion, Vector3};
 use pollster::block_on;
 use rand::Rng;
-use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
+use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
+use rayon::prelude::*;
 use texture::Texture;
-use wgpu::{util::DeviceExt, BindGroup, BindGroupLayout, Buffer, BufferAddress, BufferSize, BufferUsages, DepthBiasState, Extent3d, ImageCopyBuffer, ImageCopyTexture, ImageDataLayout, Origin3d, PipelineLayout, RenderPipeline, Sampler, ShaderModule, TextureView};
+use wgpu::{util::DeviceExt, BindGroup, BindGroupLayout, Buffer, BufferAddress, BufferSize, BufferUsages, DepthBiasState, Extent3d, ImageCopyBuffer, ImageCopyTexture, ImageDataLayout, Origin3d, PipelineLayout, RenderPass, RenderPipeline, Sampler, ShaderModule, TextureView};
 use winit::{
     dpi::PhysicalSize, event::*, event_loop::{ControlFlow, EventLoop}, window::{self, Fullscreen, WindowBuilder}
 };
 use winit::window::Window;
 use wgpu::TextureFormat;
-use crate::resources::*;
+use crossbeam::{self, thread::Scope};
+use crate::{model::{clone_instances_data, take_instances_data, WorkingModel}, resources::*};
 
 #[cfg(windows)]
 use winit::{platform::windows::{WindowBuilderExtWindows, WindowExtWindows, IconExtWindows}};
@@ -282,11 +284,11 @@ impl State {
         let free_cam = true;
         let size = window.inner_size();
 
-        #[cfg(windows)]
-        let default_backend = wgpu::Backends::DX12;
-
-        #[cfg(not(windows))]
+        #[cfg(any(windows, linux))]
         let default_backend = wgpu::Backends::VULKAN;
+
+        #[cfg(not(any(windows, linux)))]
+        let default_backend = wgpu::Backends::PRIMARY;
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: default_backend,
@@ -1016,13 +1018,13 @@ impl State {
         models.push(obj_model);
         //movable_model_counts +=1;
         let mut rng = rand::rng();
-        let instances_num = 1000;
+        let instances_num = 130;
         for i in 1..=0 {
         let test_mesh = resources::load_model("default_cube.obj",
                 "opengl".to_string(), 
                 &device, &queue, &texture_bind_group_layout,
-                instances_num,cgmath::Vector3 { x: (rng.random_range(-1500.0..1500.0) as f32),
-                y: (rng.random_range(30.0..100.0)  as f32), z: (rng.random_range(-1500.0..1500.0)  as f32) }).await.unwrap();
+                instances_num,cgmath::Vector3 { x: (rng.random_range(-150.0..150.0) as f32),
+                y: (rng.random_range(30.0..100.0)  as f32), z: (rng.random_range(-150.0..150.0)  as f32) }).await.unwrap();
 
         models.push(test_mesh); 
         println!("pushed : {i}");
@@ -1387,315 +1389,455 @@ impl State {
         //self.directional_light.rotate_light((4.0 * dt.as_secs_f32()), (10.0 * dt.as_secs_f32()), 0.0);
         self.directional_light_uniform_data = self.directional_light.generate_directional_light_data();
         
-        
-        
-        use rayon::prelude::*;
 
         if self.models.len() > 1{
             ///// test moving models, will be ignored when model len() !>1 ///
-            println!("chunking model update()");
-            let chunk_size_f = self.models.len().to_f32().unwrap()/8.0;
+            //println!("chunking model update()");
+            let chunk_size_f = self.models.len().to_f32().unwrap()/12.0;
             let chunk_size = chunk_size_f.ceil().to_usize().unwrap();
-            let model_chunks = self.models
-                .par_chunks(chunk_size)
+            let temp_models = take_instances_data(&mut self.models);
+            let model_chunks = temp_models
+                .chunks(chunk_size)
                 .collect::<Vec<_>>();
-            let model_chunk_0: &[Model] = model_chunks.get(0).unwrap();
-            let model_chunk_1: Option<&[Model]>  = model_chunks.get(1).map(|v| &**v);
-            let model_chunk_2: Option<&[Model]>  = model_chunks.get(2).map(|v| &**v);
-            let model_chunk_3: Option<&[Model]>  = model_chunks.get(3).map(|v| &**v);
-            let model_chunk_4: Option<&[Model]>  = model_chunks.get(4).map(|v| &**v);
-            let model_chunk_5: Option<&[Model]>  = model_chunks.get(5).map(|v| &**v);
-            let model_chunk_6: Option<&[Model]>  = model_chunks.get(6).map(|v| &**v);
-            let model_chunk_7: Option<&[Model]>  = model_chunks.get(7).map(|v| &**v);
-            let mut modelpos_chunk_0: Vec<Vector3<f32>> = vec![];
-            let mut modelpos_chunk_1: Vec<Vector3<f32>> = vec![];
-            let mut modelpos_chunk_2: Vec<Vector3<f32>> = vec![];
-            let mut modelpos_chunk_3: Vec<Vector3<f32>> = vec![];
-            let mut modelpos_chunk_4: Vec<Vector3<f32>> = vec![];
-            let mut modelpos_chunk_5: Vec<Vector3<f32>> = vec![];
-            let mut modelpos_chunk_6: Vec<Vector3<f32>> = vec![];
-            let mut modelpos_chunk_7: Vec<Vector3<f32>> = vec![];
-            println!("chunking position of models");
-            if !model_chunk_0.is_empty(){
-                
-                for model in model_chunk_0{
-                    for k in &model.instances{
-                        modelpos_chunk_0.push(k.position);
-                    }
-                
-                }
-            }
-            match model_chunk_1{
-                Some(models) => {
-                    for model in models{
-                        for k in &model.instances{
-                            modelpos_chunk_1.push(k.position);
-                        }
-                    }
-                }
-                None => {} 
-            }
-            match model_chunk_2{
-                Some(models) => {
-                    for model in models{
-                        for k in &model.instances{
-                            modelpos_chunk_2.push(k.position);
-                        }
-                    }
-                }
-                None => {} 
-            }
-            match model_chunk_3{
-                Some(models) => {
-                    for model in models{
-                        for k in &model.instances{
-                            modelpos_chunk_3.push(k.position);
-                        }
-                    }
-                }
-                None => {} 
-            }
-            match model_chunk_4{
-                Some(models) => {
-                    for model in models{
-                        for k in &model.instances{
-                            modelpos_chunk_4.push(k.position);
-                        }
-                    }
-                }
-                None => {} 
-            }
-            match model_chunk_5{
-                Some(models) => {
-                    for model in models{
-                        for k in &model.instances{
-                            modelpos_chunk_5.push(k.position);
-                        }
-                    }
-                }
-                None => {} 
-            }
-            match model_chunk_6{
-                Some(models) => {
-                    for model in models{
-                        for k in &model.instances{
-                            modelpos_chunk_6.push(k.position);
-                        }
-                    }
-                }
-                None => {} 
-            }
-            match model_chunk_7{
-                Some(models) => {
-                    for model in models{
-                        for k in &model.instances{
-                            modelpos_chunk_7.push(k.position);
-                        }
-                    }
-                }
-                None => {} 
-            }
-            
-            println!("generating channels");
-            let mut pos: Arc<Mutex<Vec<Vector3<f32>>>>= Arc::new(Mutex::new(vec![]));
-            let (tx_0 ,rx_0): (SyncSender<Vec<Vector3<f32>>>, Receiver<Vec<Vector3<f32>>> ) = mpsc::sync_channel(1);
-            let (tx_1 ,rx_1): (SyncSender<Vec<Vector3<f32>>>, Receiver<Vec<Vector3<f32>>> ) = mpsc::sync_channel(1);
-            let (tx_2 ,rx_2): (SyncSender<Vec<Vector3<f32>>>, Receiver<Vec<Vector3<f32>>> ) = mpsc::sync_channel(1);
-            let (tx_3 ,rx_3): (SyncSender<Vec<Vector3<f32>>>, Receiver<Vec<Vector3<f32>>> ) = mpsc::sync_channel(1);
-            let (tx_4 ,rx_4): (SyncSender<Vec<Vector3<f32>>>, Receiver<Vec<Vector3<f32>>> ) = mpsc::sync_channel(1);
-            let (tx_5 ,rx_5): (SyncSender<Vec<Vector3<f32>>>, Receiver<Vec<Vector3<f32>>> ) = mpsc::sync_channel(1);
-            let (tx_6 ,rx_6): (SyncSender<Vec<Vector3<f32>>>, Receiver<Vec<Vector3<f32>>> ) = mpsc::sync_channel(1);
-            let (tx_7 ,rx_7): (SyncSender<Vec<Vector3<f32>>>, Receiver<Vec<Vector3<f32>>> ) = mpsc::sync_channel(1);
-            println!("spawning t_0");
+            let chunk_0 = model_chunks.get(0).unwrap().to_vec();
+            let chunk_1: Option<Vec<WorkingModel>>  = {
+                let c: Option<Vec<WorkingModel>>;
+                if model_chunks.get(1).is_some(){
+                    c = Some(
+                        model_chunks.get(1).unwrap().to_vec()
+                    )
+                } else { c = None }
+                c
+            };
+            let chunk_2: Option<Vec<WorkingModel>>  = {
+                let c: Option<Vec<WorkingModel>>;
+                if model_chunks.get(2).is_some(){
+                    c = Some(
+                        model_chunks.get(2).unwrap().to_vec()
+                    )
+                } else { c = None }
+                c
+            };
+            let chunk_3: Option<Vec<WorkingModel>>  = {
+                let c: Option<Vec<WorkingModel>>;
+                if model_chunks.get(3).is_some(){
+                    c = Some(
+                        model_chunks.get(3).unwrap().to_vec()
+                    )
+                } else { c = None }
+                c
+            };
+            let chunk_4: Option<Vec<WorkingModel>>  = {
+                let c: Option<Vec<WorkingModel>>;
+                if model_chunks.get(4).is_some(){
+                    c = Some(
+                        model_chunks.get(4).unwrap().to_vec()
+                    )
+                } else { c = None }
+                c
+            };
+            let chunk_5: Option<Vec<WorkingModel>>  = {
+                let c: Option<Vec<WorkingModel>>;
+                if model_chunks.get(5).is_some(){
+                    c = Some(
+                        model_chunks.get(5).unwrap().to_vec()
+                    )
+                } else { c = None }
+                c
+            };
+            let chunk_6: Option<Vec<WorkingModel>>  = {
+                let c: Option<Vec<WorkingModel>>;
+                if model_chunks.get(6).is_some(){
+                    c = Some(
+                        model_chunks.get(6).unwrap().to_vec()
+                    )
+                } else { c = None }
+                c
+            };
+            let chunk_7: Option<Vec<WorkingModel>>  = {
+                let c: Option<Vec<WorkingModel>>;
+                if model_chunks.get(7).is_some(){
+                    c = Some(
+                        model_chunks.get(7).unwrap().to_vec()
+                    )
+                } else { c = None }
+                c
+            };
+            let chunk_8: Option<Vec<WorkingModel>>  = {
+                let c: Option<Vec<WorkingModel>>;
+                if model_chunks.get(8).is_some(){
+                    c = Some(
+                        model_chunks.get(8).unwrap().to_vec()
+                    )
+                } else { c = None }
+                c
+            };
+            let chunk_9: Option<Vec<WorkingModel>>  = {
+                let c: Option<Vec<WorkingModel>>;
+                if model_chunks.get(9).is_some(){
+                    c = Some(
+                        model_chunks.get(9).unwrap().to_vec()
+                    )
+                } else { c = None }
+                c
+            };
+            let chunk_10: Option<Vec<WorkingModel>>  = {
+                let c: Option<Vec<WorkingModel>>;
+                if model_chunks.get(10).is_some(){
+                    c = Some(
+                        model_chunks.get(10).unwrap().to_vec()
+                    )
+                } else { c = None }
+                c
+            };
+            let chunk_11: Option<Vec<WorkingModel>>  = {
+                let c: Option<Vec<WorkingModel>>;
+                if model_chunks.get(11).is_some(){
+                    c = Some(
+                        model_chunks.get(11).unwrap().to_vec()
+                    )
+                } else { c = None }
+                c
+            };
+            let mut models_res: Arc<Mutex<Vec<WorkingModel>>>= Arc::new(Mutex::new(vec![]));
+
+            let dts = dt.as_secs_f32();
             let t_0 = std::thread::spawn(move || {
-                let mut l_pos: Vec<Vector3<f32>> = vec![];
-                for i in 0..modelpos_chunk_0.len(){
-                    l_pos.push(model::test_move_model_vec3(modelpos_chunk_0[i], dt));
-                }
-                let mut sent = false;
-                while !sent {
-                    println!("sending new pos : pos len() = {:?}", l_pos.len());
-                    let res =tx_0.send(l_pos.clone());
-                    match res {
-                        Ok(_) => {sent = true}
-                        Err(err) => {println!("{:?}",err); sent = false}
+                let mut models = vec![];
+                
+                for m in chunk_0{
+                    let mut model = WorkingModel{
+                        instances: vec![]
+                    };
+                    let mut l_pos: Vec<Instance> = vec![];
+                    for i in m.instances {
+                        l_pos.push(model::test_move_model(i, dts));
                     }
+                    model.instances = l_pos;
+                    models.push(model);
                 }
+                models
             });
-            println!("spawning t_1");
-            let t_1 = std::thread::spawn(move || {
-                let mut l_pos: Vec<Vector3<f32>> = vec![];
-                for i in 0..modelpos_chunk_1.len(){
-                    l_pos.push(model::test_move_model_vec3(modelpos_chunk_1[i], dt));
-                }
-                let mut sent = false;
-                while !sent {
-                    println!("sending new pos : pos len() = {:?}", l_pos.len());
-                    let res = tx_1.send(l_pos.clone());
-                    match res {
-                        Ok(_) => {sent = true}
-                        Err(err) => {println!("{:?}",err); sent = false}
+            let mut t_1 = None;
+            if chunk_1.is_some(){
+                t_1 = Some(std::thread::spawn(move || {
+                    let mut models = vec![];
+                    
+                    for m in chunk_1.unwrap(){
+                        let mut model = WorkingModel{
+                            instances: vec![]
+                        };
+                        let mut l_pos: Vec<Instance> = vec![];
+                        for i in m.instances {
+                            l_pos.push(model::test_move_model(i, dts));
+                        }
+                        model.instances = l_pos;
+                        models.push(model);
                     }
-                }
-            });
-            println!("spawning t_2");
-            let t_2 = std::thread::spawn(move || {
-                let mut l_pos: Vec<Vector3<f32>> = vec![];
-                for i in 0..modelpos_chunk_2.len(){
-                    l_pos.push(model::test_move_model_vec3(modelpos_chunk_2[i], dt));
-                }
-                let mut sent = false;
-                while !sent {
-                    println!("sending new pos : pos len() = {:?}", l_pos.len());
-                    let res = tx_2.send(l_pos.clone());
-                    match res {
-                        Ok(_) => {sent = true}
-                        Err(err) => {println!("{:?}",err); sent = false}
+                    models
+                }))
+            }
+            let mut t_2 = None;
+            if chunk_2.is_some(){
+                t_2 = Some(std::thread::spawn(move || {
+                    let mut models = vec![];
+                    
+                    for m in chunk_2.unwrap(){
+                        let mut model = WorkingModel{
+                            instances: vec![]
+                        };
+                        let mut l_pos: Vec<Instance> = vec![];
+                        for i in m.instances {
+                            l_pos.push(model::test_move_model(i, dts));
+                        }
+                        model.instances = l_pos;
+                        models.push(model);
                     }
-                }
-            });
-            println!("spawning t_3");
-            let t_3 = std::thread::spawn(move || {
-                let mut l_pos: Vec<Vector3<f32>> = vec![];
-                for i in 0..modelpos_chunk_3.len(){
-                    l_pos.push(model::test_move_model_vec3(modelpos_chunk_3[i], dt));
-                }
-                let mut sent = false;
-                while !sent {
-                    println!("sending new pos : pos len() = {:?}", l_pos.len());
-                    let res = tx_3.send(l_pos.clone());
-                    match res {
-                        Ok(_) => {sent = true}
-                        Err(err) => {println!("{:?}",err); sent = false}
+                    models
+                }))
+            }
+            let mut t_3 = None;
+            if chunk_3.is_some(){
+                t_3 = Some(std::thread::spawn(move || {
+                    let mut models = vec![];
+                    
+                    for m in chunk_3.unwrap(){
+                        let mut model = WorkingModel{
+                            instances: vec![]
+                        };
+                        let mut l_pos: Vec<Instance> = vec![];
+                        for i in m.instances {
+                            l_pos.push(model::test_move_model(i, dts));
+                        }
+                        model.instances = l_pos;
+                        models.push(model);
                     }
-                }
-            });
-            println!("spawning t_6");
-            let t_4 = std::thread::spawn(move || {
-                let mut l_pos: Vec<Vector3<f32>> = vec![];
-                for i in 0..modelpos_chunk_4.len(){
-                    l_pos.push(model::test_move_model_vec3(modelpos_chunk_4[i], dt));
-                }
-                let mut sent = false;
-                while !sent {
-                    println!("sending new pos : pos len() = {:?}", l_pos.len());
-                    let res = tx_4.send(l_pos.clone());
-                    match res {
-                        Ok(_) => {sent = true}
-                        Err(err) => {println!("{:?}",err); sent = false}
+                    models
+                }))
+            }
+            let mut t_4 = None;
+            if chunk_4.is_some(){
+                t_4 = Some(std::thread::spawn(move || {
+                    let mut models = vec![];
+                    
+                    for m in chunk_4.unwrap(){
+                        let mut model = WorkingModel{
+                            instances: vec![]
+                        };
+                        let mut l_pos: Vec<Instance> = vec![];
+                        for i in m.instances {
+                            l_pos.push(model::test_move_model(i, dts));
+                        }
+                        model.instances = l_pos;
+                        models.push(model);
                     }
-                }
-            });
-            println!("spawning t_6");
-            let t_5 = std::thread::spawn(move || {
-                let mut l_pos: Vec<Vector3<f32>> = vec![];
-                for i in 0..modelpos_chunk_5.len(){
-                    l_pos.push(model::test_move_model_vec3(modelpos_chunk_5[i], dt));
-                }
-                let mut sent = false;
-                while !sent {
-                    println!("sending new pos : pos len() = {:?}", l_pos.len());
-                    let res = tx_5.send(l_pos.clone());
-                    match res {
-                        Ok(_) => {sent = true}
-                        Err(err) => {println!("{:?}",err); sent = false}
+                    models
+                }))
+            }
+            let mut t_5 = None;
+            if chunk_5.is_some(){
+                t_5 = Some(std::thread::spawn(move || {
+                    let mut models = vec![];
+                    
+                    for m in chunk_5.unwrap(){
+                        let mut model = WorkingModel{
+                            instances: vec![]
+                        };
+                        let mut l_pos: Vec<Instance> = vec![];
+                        for i in m.instances {
+                            l_pos.push(model::test_move_model(i, dts));
+                        }
+                        model.instances = l_pos;
+                        models.push(model);
                     }
-                }
-            });
-            println!("spawning t_6");
-            let t_6 = std::thread::spawn(move || {
-                let mut l_pos: Vec<Vector3<f32>> = vec![];
-                for i in 0..modelpos_chunk_6.len(){
-                    l_pos.push(model::test_move_model_vec3(modelpos_chunk_6[i], dt));
-                }
-                let mut sent = false;
-                while !sent {
-                    println!("sending new pos : pos len() = {:?}", l_pos.len());
-                    let res = tx_6.send(l_pos.clone());
-                    match res {
-                        Ok(_) => {sent = true}
-                        Err(err) => {println!("{:?}",err); sent = false}
+                    models
+                }))
+            }
+            let mut t_6 = None;
+            if chunk_6.is_some(){
+                t_6 = Some(std::thread::spawn(move || {
+                    let mut models = vec![];
+                    
+                    for m in chunk_6.unwrap(){
+                        let mut model = WorkingModel{
+                            instances: vec![]
+                        };
+                        let mut l_pos: Vec<Instance> = vec![];
+                        for i in m.instances {
+                            l_pos.push(model::test_move_model(i, dts));
+                        }
+                        model.instances = l_pos;
+                        models.push(model);
                     }
-                }
-            });
-            println!("spawning t_7");
-            let t_7 = std::thread::spawn(move || {
-                let mut l_pos: Vec<Vector3<f32>> = vec![];
-                for i in 0..modelpos_chunk_7.len(){
-                    l_pos.push(model::test_move_model_vec3(modelpos_chunk_7[i], dt));
-                }
-                let mut sent = false;
-                while !sent {
-                    println!("sending new pos : pos len() = {:?}", l_pos.len());
-                    let res = tx_7.send(l_pos.clone());
-                    match res {
-                        Ok(_) => {sent = true}
-                        Err(err) => {println!("{:?}",err); sent = false}
+                    models
+                }))
+            }
+            let mut t_7 = None;
+            if chunk_7.is_some(){
+                t_7 = Some(std::thread::spawn(move || {
+                    let mut models = vec![];
+                    
+                    for m in chunk_7.unwrap(){
+                        let mut model = WorkingModel{
+                            instances: vec![]
+                        };
+                        let mut l_pos: Vec<Instance> = vec![];
+                        for i in m.instances {
+                            l_pos.push(model::test_move_model(i, dts));
+                        }
+                        model.instances = l_pos;
+                        models.push(model);
                     }
-                }
-            });
+                    models
+                }))
+            }
+            let mut t_8 = None;
+            if chunk_8.is_some(){
+                t_8 = Some(std::thread::spawn(move || {
+                    let mut models = vec![];
+                    for m in chunk_8.unwrap(){
+                        let mut model = WorkingModel{
+                            instances: vec![]
+                        };
+                        let mut l_pos: Vec<Instance> = vec![];
+                        for i in m.instances {
+                            l_pos.push(model::test_move_model(i, dts));
+                        }
+                        model.instances = l_pos;
+                        models.push(model);
+                    }
+                    models
+                }))
+            }
+            let mut t_9 = None;
+            if chunk_9.is_some(){
+                t_9 = Some(std::thread::spawn(move || {
+                    let mut models = vec![];
+                    
+                    for m in chunk_9.unwrap(){
+                        let mut model = WorkingModel{
+                            instances: vec![]
+                        };
+                        let mut l_pos: Vec<Instance> = vec![];
+                        for i in m.instances {
+                            l_pos.push(model::test_move_model(i, dts));
+                        }
+                        model.instances = l_pos;
+                        models.push(model);
+                    }
+                    models
+                }))
+            }
+            let mut t_10 = None;
+            if chunk_10.is_some(){
+                t_10 = Some(std::thread::spawn(move || {
+                    let mut models = vec![];
+                    for m in chunk_10.unwrap(){
+                        let mut model = WorkingModel{
+                            instances: vec![]
+                        };
+                        let mut l_pos: Vec<Instance> = vec![];
+                        for i in m.instances {
+                            l_pos.push(model::test_move_model(i, dts));
+                        }
+                        model.instances = l_pos;
+                        models.push(model);
+                    }
+                    models
+                }))
+            }
+            let mut t_11 = None;
+            if chunk_11.is_some(){
+                t_11 = Some(std::thread::spawn(move || {
+                    let mut models = vec![];
+                    for m in chunk_11.unwrap(){
+                        let mut model = WorkingModel{
+                            instances: vec![]
+                        };
+                        let mut l_pos: Vec<Instance> = vec![];
+                        for i in m.instances {
+                            l_pos.push(model::test_move_model(i, dts));
+                        }
+                        model.instances = l_pos;
+                        models.push(model);
+                    }
+                    models
+                }))
+            }
             
-            match &mut pos.lock(){
+
+            match &mut models_res.lock(){
                 Ok(g) => {
-                    g.append(&mut rx_0.recv().unwrap());
-                    g.append(&mut rx_1.recv().unwrap());
-                    g.append(&mut rx_2.recv().unwrap());
-                    g.append(&mut rx_3.recv().unwrap());
-                    g.append(&mut rx_4.recv().unwrap());
-                    g.append(&mut rx_5.recv().unwrap());
-                    g.append(&mut rx_6.recv().unwrap());
-                    g.append(&mut rx_7.recv().unwrap());
+                    g.append(&mut t_0.join().unwrap());
+                    if t_1.is_some(){
+                        g.append(&mut t_1.unwrap().join().unwrap());
+                        
+                    }
+                    if t_2.is_some(){
+                        g.append(&mut t_2.unwrap().join().unwrap());
+                    }
+                    if t_3.is_some(){
+                        g.append(&mut t_3.unwrap().join().unwrap());
+                    }
+                    if t_4.is_some(){
+                        g.append(&mut t_4.unwrap().join().unwrap());
+                    }
+                    if t_5.is_some(){
+                        g.append(&mut t_5.unwrap().join().unwrap());
+                    }
+                    if t_6.is_some(){
+                        g.append(&mut t_6.unwrap().join().unwrap());
+                    }
+                    if t_7.is_some(){
+                        g.append(&mut t_7.unwrap().join().unwrap());
+                    }
+                    if t_8.is_some(){
+                        g.append(&mut t_8.unwrap().join().unwrap());
+                    }
+                    if t_9.is_some(){
+                        g.append(&mut t_9.unwrap().join().unwrap());
+                    }
+                    if t_10.is_some(){
+                        g.append(&mut t_10.unwrap().join().unwrap());
+                    }
+                    if t_11.is_some(){
+                        g.append(&mut t_11.unwrap().join().unwrap());
+                    }
+                    
                 }
                 Err(err) => {println!("{err}")}
             }
             
-            // model_chunks.into_par_iter().for_each(|models|{
-            //     let mut chunk_pos = (0..models.len())
-            //         .into_iter()
-            //         .map(|i| model::test_move_model_vec3(models[i].instances[0].position , dt)).collect::<Vec<_>>();
-            //     pos.lock().unwrap().append(&mut chunk_pos);
-            // });
-
-
-            // for models in model_chunks{
-            //     let mut chunk_pos = (0..models.len())
-            //         .into_iter()
-            //         .map(|i| model::test_move_model_vec3(models[i].instances[0].position , dt)).collect::<Vec<_>>();
-            //     pos.append(&mut chunk_pos);
-            // }
-            //let newpos: Vec<Vector3<f32>> = (1..self.models.len()).into_par_iter().map(|i| model::test_move_model_vec3(self.models[i].instances[0].position , dt)).collect::<Vec<_>>();
-            let mut newpos: Vec<Vector3<f32>> = vec![];
-            newpos = pos.as_ref().lock().unwrap().clone();
-            println!("self.models.len() : {:?}", self.models.len());
-            println!("newpos.len() : {:?}", newpos.len());
-            println!("pos.len() : {:?}", pos.lock().unwrap().len());
-            // for i in 0..self.models.len(){
-            //     self.models[i].instances[0].position = newpos[i]
-            // }
-            let mut count = 0;
+            let mut models =models_res.as_ref().lock().unwrap();
             for i in 0..self.models.len(){
-                    for j in 0..self.models[i].instances.len(){
-                        self.models[i].instances[j].position = newpos[count];
-                        count += 1;
-                    }
-                }
-
-            for i in 0..self.models.len(){
-                if i != 0{
-                    let instance_data = self.models[i].instances.iter().map(model::Instance::to_raw).collect::<Vec<_>>();
-                    self.queue.write_buffer(&self.models[i].instance_buffer, 0, bytemuck::cast_slice(&instance_data)); 
+                self.models[i].instances = std::mem::take(&mut models[i].instances);
                 }
             
+            if self.models.len() > 100 {
+                self.models
+                    .par_iter()
+                    .with_min_len(larger_usize(100, self.models.len()/4))
+                    .enumerate()
+                    .for_each(|m|{
+                            if m.0 != 0 {
+                                let instance_data;
+                                if m.1.instance_num > 700 {
+                                    instance_data = m.1.instances.par_iter()
+                                        .with_min_len(larger_usize(700, m.1.instance_num as usize/3))
+                                        .map(model::Instance::to_raw)
+                                        .collect::<Vec<_>>();
+                                } else {
+                                    instance_data = m.1.instances.iter()
+                                        .map(model::Instance::to_raw)
+                                        .collect::<Vec<_>>();
+                                }
+                                self.queue.write_buffer(&m.1.instance_buffer, 0, bytemuck::cast_slice(&instance_data));
+                            }
+                        }
+                    );
+            } else {
+                self.models
+                    .iter()
+                    .enumerate()
+                    .for_each(|m|{
+                            if m.0 != 0 {
+                                let instance_data;
+                                if m.1.instance_num > 700 {
+                                    instance_data = m.1.instances.par_iter()
+                                        .with_min_len(larger_usize(700, m.1.instance_num as usize/3))
+                                        .map(model::Instance::to_raw)
+                                        .collect::<Vec<_>>();
+                                } else {
+                                    instance_data = m.1.instances.iter()
+                                        .map(model::Instance::to_raw)
+                                        .collect::<Vec<_>>();
+                                }
+                                self.queue.write_buffer(&m.1.instance_buffer, 0, bytemuck::cast_slice(&instance_data));
+                            }
+                        }
+                    );
             }
+            
+                //single threaded
+                // for i in 1..self.models.len(){
+                //     let instance_data = self.models[i].instances.iter().map(model::Instance::to_raw).collect::<Vec<_>>();
+                //     self.queue.write_buffer(&self.models[i].instance_buffer, 0, bytemuck::cast_slice(&instance_data)); 
+                // }
         }
 
-        // Generate vertices
-        let frametime_vertices = self.frame_time_graph.get_vertices(self.window.inner_size().width as f32, self.window.inner_size().height as f32);
+        match self.render_output_mode {
+            RenderOutputMode::DebugLitWithShadow => {
+                // Generate vertices
+                let frametime_vertices = self.frame_time_graph.get_vertices(self.window.inner_size().width as f32, self.window.inner_size().height as f32);
+                self.queue.write_buffer(&self.frametime_vertex_buffer, 0, bytemuck::cast_slice(&[frametime_vertices]));
+            },
+            _ => {}
+        }
 
         // Write to vertex buffer
         
         /////////
-        self.queue.write_buffer(&self.frametime_vertex_buffer, 0, bytemuck::cast_slice(&[frametime_vertices]));
+        
         
         self.queue.write_buffer(&self.camera_buffer, 0,bytemuck::cast_slice(&[self.camera_uniform]));
         
@@ -1705,6 +1847,8 @@ impl State {
     }
 
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+        let mut command_count: Arc<Mutex<u16>> = Arc::new(Mutex::new(0));
+        let start = instant::Instant::now();
         let output = self.surface.get_current_texture()?;
 
         let view = output.texture.create_view(&wgpu:: TextureViewDescriptor{
@@ -1716,43 +1860,63 @@ impl State {
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Render Encoder"),
         });
+        let mut shadow_encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Shadow Pass Encoder")
+        });
+        let mut debug_overlay_encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Debug Overlay Encoder")
+        });
+        let mut frametime_overlay_encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Frametime Overlay Encoder")
+        });
 
-        //shadow pass
-        match self.render_output_mode{
-            RenderOutputMode::LitWithShadow | RenderOutputMode::DebugLitWithShadow => {
-                let mut shadow_pass = Arc::new(Mutex::new(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("Shadow Pass"),
-                    color_attachments: &[], // No color output
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &self.shadow_texture_view,
-                        depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(1.0), // Clear to max depth
-                            store: true,
-                        }),
-                        stencil_ops: None,
-                    }),
-                })));
-                shadow_pass.lock().unwrap().set_pipeline(&self.shadow_pipeline);
-                shadow_pass.lock().unwrap().set_bind_group(0, &self.shadow_pass_light_bind_group, &[]);
-                &self.models.par_iter().for_each(|model|{
-                    let vb =model.instance_buffer.slice(..);
-                    let mut locked_sp = shadow_pass.lock().unwrap();
-                    locked_sp.set_vertex_buffer(1, vb );
-                    for mesh in &model.meshes{
-                        locked_sp.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                        locked_sp.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                        locked_sp.set_bind_group(0, &self.shadow_pass_light_bind_group, &[]);
-                        locked_sp.set_bind_group(1, &self.camera_bind_group, &[]);
-                        locked_sp.draw_indexed(0..mesh.num_elements, 0, (0..model.instances.len() as u32).clone());
-                    }
-                });
+        let res =crossbeam::thread::scope(|s| {
+            //shadow pass
+            match self.render_output_mode{
+                RenderOutputMode::LitWithShadow | RenderOutputMode::DebugLitWithShadow => {
+                    let shadow_handler = s.spawn(|s_inner|{
+                        let mut temp_counts: u16 = 0;
+                        let mut shadow_pass = shadow_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("Shadow Pass"),
+                            color_attachments: &[], // No color output
+                            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                                view: &self.shadow_texture_view,
+                                depth_ops: Some(wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(1.0), // Clear to max depth
+                                    store: true,
+                                }),
+                                stencil_ops: None,
+                            }),
+                        });
+                        shadow_pass.set_pipeline(&self.shadow_pipeline);
+                        shadow_pass.set_bind_group(0, &self.shadow_pass_light_bind_group, &[]);
+                        temp_counts += 2;
+                        
+                        for model in &self.models {
+                            if model.cast_shadow{
+                                let vb = model.instance_buffer.slice(..);
+                                shadow_pass.set_vertex_buffer(1, vb);
+                                temp_counts += 1;
+                                for mesh in &model.meshes {
+                                    shadow_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                                    shadow_pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                                    shadow_pass.set_bind_group(0, &self.shadow_pass_light_bind_group, &[]);
+                                    shadow_pass.set_bind_group(1, &self.camera_bind_group, &[]);
+                                    shadow_pass.draw_indexed(0..mesh.num_elements, 0, (0..model.instances.len() as u32).clone());
+                                    temp_counts += 5;
+                                }
+                            }
+                        }
+                        *command_count.lock().unwrap() = temp_counts;
+                    });
+                }
+                _ => {}
             }
-            _ => {}
-        }
-        
-
-        {
-            let mut render_pass = Arc::new(Mutex::new(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            
+            //render pass
+            let renderpass_handler = s.spawn(|_|{
+                let mut temp_counts: u16 = 0;
+                let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
@@ -1775,151 +1939,173 @@ impl State {
                     }),
                     stencil_ops: None,
                 }),
-            })));
+            });
 
-            use crate::model::DrawModel;
             match self.render_output_mode {
                 RenderOutputMode::Unlit => {
-                    render_pass.lock().unwrap().set_pipeline(&self.unlit_render_pipeline);
-                    &self.models.par_iter().for_each(|model|{
-                        let vb =model.instance_buffer.slice(..);
-                        let mut locked_rp = render_pass.lock().unwrap();
-                        locked_rp.set_vertex_buffer(1, vb );
+                    render_pass.set_pipeline(&self.unlit_render_pipeline);
+                    temp_counts += 1;
 
-                        for mesh in &model.meshes{
-                            locked_rp.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                            locked_rp.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    for model in &self.models {
+                        let vb =model.instance_buffer.slice(..);
+                        render_pass.set_vertex_buffer(1, vb);
+                        temp_counts += 1;
+                        for mesh in &model.meshes {
+                            render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                            render_pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                             if !&model.materials.is_empty() {
                                 let material = &model.materials[mesh.material];
-                                locked_rp.set_bind_group(0, &material.bind_group, &[]);
+                                render_pass.set_bind_group(0, &material.bind_group, &[]);
+                                temp_counts += 1;
                             }
-                            locked_rp.set_bind_group(1, &self.camera_bind_group, &[]);
-                            locked_rp.draw_indexed(0..mesh.num_elements, 0, (0..model.instances.len() as u32).clone());
+                            render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
+                            render_pass.draw_indexed(0..mesh.num_elements, 0, (0..model.instances.len() as u32));
+                            temp_counts += 4;
                         }
-                    });
+                    }
+
                 }
                 RenderOutputMode::Lit => {
-                    render_pass.lock().unwrap().set_pipeline(&self.lit_render_pipeline);
-                    &self.models.par_iter().for_each(|model|{
-                        let vb =model.instance_buffer.slice(..);
-                        let mut locked_rp = render_pass.lock().unwrap();
-                        locked_rp.set_vertex_buffer(1, vb );
+                    render_pass.set_pipeline(&self.lit_render_pipeline);
+                    temp_counts += 1;
+
+                    for model in &self.models {
+                        let vb = model.instance_buffer.slice(..);
+                        render_pass.set_vertex_buffer(1, vb);
+                        temp_counts += 1;
 
                         for mesh in &model.meshes{
-                            locked_rp.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                            locked_rp.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                            render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                            render_pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                             if !&model.materials.is_empty() {
                                 let material = &model.materials[mesh.material];
-                                locked_rp.set_bind_group(0, &material.bind_group, &[]);
+                                render_pass.set_bind_group(0, &material.bind_group, &[]);
+                                temp_counts += 1;
                             }
-                            locked_rp.set_bind_group(1, &self.camera_bind_group, &[]);
-                            locked_rp.set_bind_group(2, &self.light_bind_group, &[]);
-                            locked_rp.draw_indexed(0..mesh.num_elements, 0, (0..model.instances.len() as u32).clone());
+                            render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
+                            render_pass.set_bind_group(2, &self.light_bind_group, &[]);
+                            render_pass.draw_indexed(0..mesh.num_elements, 0, (0..model.instances.len() as u32).clone());
+                            temp_counts += 5;
                         }
-                    });
+                    }
                 }
                 RenderOutputMode::LitWithShadow => {
                     //println!("rendering Colored");
-                    render_pass.lock().unwrap().set_pipeline(&self.render_pipeline);
-                    &self.models.par_iter().for_each(|model|{
-                        let vb =model.instance_buffer.slice(..);
-                        let mut locked_rp = render_pass.lock().unwrap();
-                        locked_rp.set_vertex_buffer(1, vb );
+                    render_pass.set_pipeline(&self.render_pipeline);
+                    temp_counts += 1;
 
-                        locked_rp.draw_model_instanced(model, 0..model.instances.len() as u32, &self.camera_bind_group, &self.light_bind_group, &self.shadow_bind_group);
-                    });
-                    // for model in &self.models {
-                    //     render_pass.lock().unwrap().set_vertex_buffer(1, model.instance_buffer.slice(..) );
-                    //     render_pass.lock().unwrap().draw_model_instanced(model, 0..model.instances.len() as u32, &self.camera_bind_group, &self.light_bind_group)
-                    // }
+                    for model in &self.models {
+                        let vb =model.instance_buffer.slice(..);
+                        render_pass.set_vertex_buffer(1, vb );
+
+                        render_pass.draw_model_instanced(model, 0..model.instances.len() as u32, &self.camera_bind_group, &self.light_bind_group, &self.shadow_bind_group);
+                        temp_counts += 2;
+                    }
+
                 }
                 RenderOutputMode::Wireframe => {
                     //println!("rendering Wireframe");
-                    render_pass.lock().unwrap().set_pipeline(&self.wireframe_pipeline);
-                    &self.models.par_iter().for_each(|model|{
-                        let vb =model.instance_buffer.slice(..);
-                        let mut locked_rp = render_pass.lock().unwrap();
-                        locked_rp.set_vertex_buffer(1, vb );
-                        locked_rp.draw_model_instanced(model, 0..model.instances.len() as u32, &self.camera_bind_group, &self.light_bind_group, &self.shadow_bind_group);
-                    });
-                    // for model in &self.models{
-                    //     render_pass.lock().unwrap().set_vertex_buffer(1, model.instance_buffer.slice(..) );
+                    render_pass.set_pipeline(&self.wireframe_pipeline);
+                    temp_counts += 1;
 
-                    //     render_pass.lock().unwrap().draw_model_instanced(model, 0..model.instances.len() as u32, &self.camera_bind_group, &self.light_bind_group);
-                    // }
+                    for model in &self.models {
+                        let vb =model.instance_buffer.slice(..);
+                        render_pass.set_vertex_buffer(1, vb);
+                        render_pass.draw_model_instanced(model, 0..model.instances.len() as u32, &self.camera_bind_group, &self.light_bind_group, &self.shadow_bind_group);
+                        temp_counts += 2;
+                    }
                 }
                 RenderOutputMode::DebugLitWithShadow => {
-                    render_pass.lock().unwrap().set_pipeline(&self.render_pipeline);
-                    &self.models.par_iter().for_each(|model|{
-                        let vb =model.instance_buffer.slice(..);
-                        let mut locked_rp = render_pass.lock().unwrap();
-                        locked_rp.set_vertex_buffer(1, vb );
-
-                        locked_rp.draw_model_instanced(model, 0..model.instances.len() as u32, &self.camera_bind_group, &self.light_bind_group, &self.shadow_bind_group);
-                    });
+                    render_pass.set_pipeline(&self.render_pipeline);
+                    temp_counts += 1;
+                    for model in &self.models {
+                        let vb = model.instance_buffer.slice(..);
+                        render_pass.set_vertex_buffer(1, vb );
+                        render_pass.draw_model_instanced(model, 0..model.instances.len() as u32, &self.camera_bind_group, &self.light_bind_group, &self.shadow_bind_group);
+                        temp_counts += 2;
+                    }
                 }
             }
-        }
+            *command_count.lock().unwrap() = temp_counts;
+            });
 
-        //debug pass
-        match self.render_output_mode {
-            RenderOutputMode::DebugLitWithShadow => {
-                let mut debug_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor{
-                    label: Some("Debug Pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
-                        resolve_target: None,
-                        ops:wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: true,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    //..Default::default()
-                });
+            //debug overlay and frametime pass
+            let debug_handler = s.spawn(|_| {
+                let mut temp_counts: u16 = 0;
+                //debug pass
+                match self.render_output_mode {
+                    RenderOutputMode::DebugLitWithShadow => {
+                        let mut debug_pass = debug_overlay_encoder.begin_render_pass(&wgpu::RenderPassDescriptor{
+                            label: Some("Debug Pass"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &view,
+                                resolve_target: None,
+                                ops:wgpu::Operations {
+                                    load: wgpu::LoadOp::Load,
+                                    store: true,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                            //..Default::default()
+                        });
 
-                debug_pass.set_pipeline(&self.debug_pass_pipeline);
-                debug_pass.set_bind_group(0, &self.debug_pass_bind_group, &[]);
-                debug_pass.set_vertex_buffer(0, self.debug_vertex_buffer.slice(..));
-                debug_pass.set_index_buffer(self.debug_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                debug_pass.draw_indexed(0..self.debug_indices.len() as u32, 0, 0..1);
-            }
-            _ => {
-                //skip debug pass
+                        debug_pass.set_pipeline(&self.debug_pass_pipeline);
+                        debug_pass.set_bind_group(0, &self.debug_pass_bind_group, &[]);
+                        debug_pass.set_vertex_buffer(0, self.debug_vertex_buffer.slice(..));
+                        debug_pass.set_index_buffer(self.debug_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                        debug_pass.draw_indexed(0..self.debug_indices.len() as u32, 0, 0..1);
+                        temp_counts += 5;
+
+                        //frametime graph pass
+                        let mut frame_time_pass = frametime_overlay_encoder.begin_render_pass(&wgpu::RenderPassDescriptor{
+                            label: Some("Frame Time Pass"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &view,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Load,
+                                    store: true,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                        });
+
+                        frame_time_pass.set_pipeline(&self.frame_time_render_pipeline);
+                        frame_time_pass.set_vertex_buffer(0, self.frametime_vertex_buffer.slice(..));
+                        frame_time_pass.draw(0..256 as u32, 0..1 as u32);
+                        temp_counts += 3;
+                    }
+                    _ => {
+                        //skip debug pass
+                        }
                 }
-        }
+                *command_count.lock().unwrap() += temp_counts;
+            });
 
-        //frame time graph pass
-        match self.render_output_mode {
-            RenderOutputMode::DebugLitWithShadow => {
-                let mut frame_time_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor{
-                    label: Some("Frame Time Pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: true,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                });
-
-                frame_time_pass.set_pipeline(&self.frame_time_render_pipeline);
-                frame_time_pass.set_vertex_buffer(0, self.frametime_vertex_buffer.slice(..));
-                frame_time_pass.draw(0..256 as u32, 0..1 as u32);
             }
-
-            _ => {}
-        }
+        ).unwrap();
         
-        self.queue.submit(std::iter::once(encoder.finish()));
+        
+        let mut command_bufs;
+        match self.render_output_mode {
+            RenderOutputMode::Unlit | RenderOutputMode::Lit | RenderOutputMode::Wireframe => {
+                command_bufs = vec![encoder.finish()];
+            },
+            RenderOutputMode::LitWithShadow => {
+                command_bufs = vec![shadow_encoder.finish(), encoder.finish()];
+            },
+            RenderOutputMode::DebugLitWithShadow => {
+                command_bufs = vec![shadow_encoder.finish(), encoder.finish(), debug_overlay_encoder.finish(), frametime_overlay_encoder.finish() ];
+            }
+        }
+        self.queue.submit(command_bufs);
 
         
         //experiment with picking value from texture
         //todo color id pass
         self.device.poll(wgpu::Maintain::Wait);
-         
+
+        #[cfg(debug_assertions)]
         if self.left_mouse_pressed {
             self.left_mouse_pressed = false;
             use wgpu::BufferDescriptor;
@@ -2040,7 +2226,8 @@ impl State {
         
 
         
-
+        let duration = instant::Instant::now() - start;
+        //println!("render took : {:?} sec, total commonds : {}", duration.as_secs_f32(), command_count.lock().unwrap());
         output.present();
         Ok(())
     }
@@ -2049,6 +2236,14 @@ impl State {
 
 fn align_up(value: u32, alignment: u32) -> u32 {
     (value + alignment - 1) / alignment * alignment
+}
+
+fn larger_usize(a: usize, b: usize) -> usize {
+    if a > b {
+        a
+    } else {
+        b
+    }
 }
 
 pub async fn run(file_path: String, file_type:String, fullscreen_mode: String, use_hdr: bool) {
@@ -2171,22 +2366,16 @@ pub async fn run(file_path: String, file_type:String, fullscreen_mode: String, u
 use std::ffi::*;
 
 #[no_mangle]
-pub unsafe  extern "C" fn run_kanirenderer(file_path_cstring: *const c_char, file_type_c: *const c_char, fs_mode_c: *const c_char, hdr_c: *const c_char ){
+pub unsafe  extern "C" fn run_kanirenderer(file_path_cstring: *const c_char, file_type_c: *const c_char, fs_mode_c: *const c_char, ){
     let file_path_cstr = CStr::from_ptr(file_path_cstring).to_str().expect("no path provided");
     let file_path: String =  file_path_cstr.into();
     if file_path.is_empty(){
         panic!("no file path provided")
     }
     let ft_cstr = CStr::from_ptr(file_type_c).to_str().unwrap_or("default");
-    let file_type:String = ft_cstr.into(); //.unwrap_or("default").try_into().unwrap_or("default".to_string());
+    let file_type:String = ft_cstr.into();
     let fs_cstr = CStr::from_ptr(fs_mode_c).to_str().unwrap_or("fullscreen");
-    let fullscreen_mode:String = fs_cstr.into(); //unwrap_or("fullscreen").try_into().unwrap_or("fullscreen".to_string());
-    let hdr_cstr = CStr::from_ptr(hdr_c).to_str().unwrap_or("false");
+    let fullscreen_mode:String = fs_cstr.into(); 
     let mut use_hdr: bool = false;
-    match hdr_cstr {
-        "true" => {use_hdr = true}
-        "false" => {use_hdr = false}
-        _ => {}
-    }
     pollster::block_on(run(file_path, file_type, fullscreen_mode, use_hdr));
 }

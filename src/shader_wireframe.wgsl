@@ -27,14 +27,6 @@ struct VertexInput {
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
-    @location(0) tex_coords: vec2<f32>,
-    @location(1) tangent_position: vec3<f32>,
-    @location(2) tangent_light_position: vec3<f32>,
-    @location(3) tangent_view_position: vec3<f32>,
-    @location(4) position: vec3<f32>,
-    @location(5) tangent_matrix_c0: vec3<f32>,
-    @location(6) tangent_matrix_c1: vec3<f32>,
-    @location(7) tangent_matrix_c2: vec3<f32>,
 };
 
 struct Light {
@@ -83,30 +75,11 @@ fn vs_main(
         instance.model_matrix_2,
         instance.model_matrix_3,
     );
-
-    let normal_matrix = mat3x3<f32>(
-        instance.normal_matrix_0,
-        instance.normal_matrix_1,
-        instance.normal_matrix_2,
-    );
-    
-    let world_normal = normalize(normal_matrix * model.normal);
-    let world_tangent = normalize(normal_matrix * model.tangent);
-    let world_bitangent = normalize(normal_matrix * model.bitangent);
-    let tangent_matrix = transpose(mat3x3<f32>(world_tangent, world_bitangent, world_normal));
     
     let world_position = model_matrix * vec4<f32>(model.position, 1.0);
 
     var out: VertexOutput;
     out.clip_position = camera.view_proj * world_position;
-    out.tex_coords = model.tex_coords;
-    out.tangent_position = tangent_matrix * world_position.xyz;
-    out.tangent_view_position = tangent_matrix * camera.view_pos.xyz;
-    out.tangent_light_position = tangent_matrix * light.position;
-    out.position = model.position;
-    out.tangent_matrix_c0 = tangent_matrix[0];
-    out.tangent_matrix_c1 = tangent_matrix[1];
-    out.tangent_matrix_c2 = tangent_matrix[2];
     
     return out;
 }

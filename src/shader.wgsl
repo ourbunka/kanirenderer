@@ -257,8 +257,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     }
     let out = reinnhard_tonemap(result);
-    //todo in a seperate pass that render ordered masked/alpha meshes
-    //return vec4<f32>(out,alpha);
     return vec4<f32>(out,1.0);
 
 }

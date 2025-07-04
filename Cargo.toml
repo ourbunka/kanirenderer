@@ -1,12 +1,12 @@
 [package]
-name = "kanirenderer_viewer"
+name = "kani_renderer"
 version = "0.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-winit ={ version = "0.28"}
+winit = { version = "0.28"}
 wgpu = "0.17"
 pollster = "0.3"
 bytemuck = { version = "1.12", features = [ "derive" ] }
@@ -15,8 +15,9 @@ cgmath = "0.18"
 tobj = { version = "4.0.0" , features = [ "async",]}
 cfg-if = "1"
 instant = "0.1"
-rayon = "1.10.0"
 rand = "0.9.0"
+crossbeam = "0.8.4"
+rayon = "1.10.0"
 
 [[res]]
 name = "res"
@@ -40,3 +41,7 @@ codegen-units = 1
 lto = true
 opt-level = "z"
 strip = "debuginfo"
+
+[profile.dev]
+opt-level = 1
+

@@ -1,6 +1,6 @@
 use std::io::{BufReader, Cursor};
 use anyhow::Ok;
-use rayon::iter::IntoParallelIterator;
+use rand::Rng;
 use wgpu::util::DeviceExt;
 use crate::{model::{self, Instance}, texture};
 use cfg_if::cfg_if;
@@ -70,11 +70,12 @@ pub async fn load_model(
     spawn_position: Vector3<f32> 
 ) -> anyhow::Result<model::Model> {
     let obj_text: String;
+    let mut cast_shadow = true;
     if file_name.is_empty(){
         file_name = "default_cube.obj"
     }
     match file_name {
-        "default_cube.obj"   => obj_text = load_string(file_name).await.unwrap_or(include_str!("../res/cube.obj").to_string()),
+        "default_cube.obj"   => obj_text = {cast_shadow = false; load_string(file_name).await.unwrap_or(include_str!("../res/cube.obj").to_string())},
         _                   => obj_text = load_string(file_name).await?,
     }
     let obj_cursor = Cursor::new(obj_text);
@@ -91,7 +92,7 @@ pub async fn load_model(
         |p| async move {
             let mat_text: String;
             match file_name {
-                "default_cube.obj"   => mat_text = load_string(&p).await.unwrap_or(include_str!("../res/cube.mtl").to_string()),
+                "default_cube.mtl"   => mat_text = load_string(&p).await.unwrap_or(include_str!("../res/cube.mtl").to_string()),
                 _                   => mat_text = load_string(&p).await.unwrap_or(include_str!("../res/cube.mtl").to_string()),
             }
             // = load_string(&p).await.unwrap();
@@ -266,16 +267,17 @@ pub async fn load_model(
         })
         .collect::<Vec<_>>();
 
-        const SPACE_BETWEEN: f32 = 3.0;
-
         let instances = (0..instance)
             .map(|i| {
-                let i_f = i.to_f32().unwrap();
-                let i_f_end = i_f*10.0;
-                let pos = rand::random_range(i_f..=i_f_end);
-                let position = Vector3 { x: pos, y: pos, z: pos };
-                let rotation = Quaternion{ v: Vector3 { x: 0.0, y: 0.0, z: 0.0 }, s: 0.0};
-                model::Instance { position, rotation }
+                let mut rng = rand::rng();
+                let position = Vector3 { 
+                    x: (spawn_position.x + i as f32 * rng.random_range(-10.0..10.0)), 
+                    y: (spawn_position.y + i as f32 * rng.random_range(-10.0..10.0)), 
+                    z: (spawn_position.z + i as f32 * rng.random_range(-10.0..10.0)) 
+                };
+                let rotation = Quaternion{ v: Vector3 { x: 0.0, y: 1.0, z: 0.0 }, s: 0.0};
+                let scale = Vector3 { x: 1.0, y: 1.0, z: 1.0 };
+                model::Instance { position, rotation, scale }
             })
             .collect::<Vec<_>>();
         let instance_data = instances.iter().map(model::Instance::to_raw).collect::<Vec<_>>();
@@ -290,7 +292,7 @@ pub async fn load_model(
     
     let instance_num = instance as i32;
 
-    Ok(model::Model {meshes, materials,instances, instance_buffer,instance_num })
+    Ok(model::Model {meshes, materials,instances, instance_buffer,instance_num, cast_shadow })
 }
 
 pub async fn load_default_cube(

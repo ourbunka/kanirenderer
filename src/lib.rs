@@ -92,7 +92,7 @@ struct State {
     window: Window,
     window_mode: WindowMode,
     render_pipeline: wgpu::RenderPipeline,
-    wireframe_pipeline: wgpu::RenderPipeline,
+    wireframe_pipeline: Option<wgpu::RenderPipeline>,
     camera: camera::Camera,
     projection: camera::Projection,
     camera_controller: camera::CameraController,
@@ -141,6 +141,8 @@ struct State {
     frame_time_graph: frametime::FrameTimeGraph,
     frametime_vertex_buffer: wgpu::Buffer,
     frame_time_render_pipeline: RenderPipeline,
+    supported_features: wgpu::Features,
+    supported_limits: wgpu::Limits,
 }
 
 fn create_render_pipeline(
@@ -304,15 +306,14 @@ impl State {
                 force_fallback_adapter: false,
             },
         ).await.unwrap();
-
+        
+        let features = adapter.features();
+        let limits = adapter.limits();
+        
         let (device, queue) = adapter.request_device(
             &wgpu::DeviceDescriptor {
-                features: optional_features(),
-                limits: if cfg!(target_arch = "wasm32") {
-                    wgpu::Limits::downlevel_webgl2_defaults()
-                } else {
-                    wgpu::Limits::default()
-                },
+                features: features.clone(),
+                limits: limits.clone(),
                 label: None,
             },
             None,
@@ -759,7 +760,6 @@ impl State {
             &wgpu::TextureViewDescriptor::default()
         );
 
-        //pcf filtering
         let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor{
             label: Some("Shadow Sampler"),
             compare: Some(wgpu::CompareFunction::LessEqual),
@@ -988,20 +988,25 @@ impl State {
                 model::InstanceRaw::desc()], 
                 shader)
         };
-
-        let wireframe_pipeline = {
-            let shader = wgpu::ShaderModuleDescriptor{
-                label: Some("Wireframe Shader"),
-                source: wgpu::ShaderSource::Wgsl(include_str!("shader_wireframe.wgsl").into()),
-            };
-            create_wireframe_pipeline(&device, 
-                &render_pipeline_layout, 
-                config.format, 
-                Some(wgpu::TextureFormat::Depth32Float), 
-                &[model::ModelVertex::desc(), 
-                model::InstanceRaw::desc()], 
-                shader)
-        };
+        let mut wireframe_pipeline = None;
+        if features.contains(wgpu::Features::POLYGON_MODE_LINE){
+            wireframe_pipeline = Some({
+                        let shader = wgpu::ShaderModuleDescriptor{
+                            label: Some("Wireframe Shader"),
+                            source: wgpu::ShaderSource::Wgsl(include_str!("shader_wireframe.wgsl").into()),
+                        };
+                        create_wireframe_pipeline(&device, 
+                            &render_pipeline_layout, 
+                            config.format, 
+                            Some(wgpu::TextureFormat::Depth32Float), 
+                            &[model::ModelVertex::desc(), 
+                            model::InstanceRaw::desc()], 
+                            shader)
+                    });
+        } else {
+            println!("wireframe mode not supported")
+        }
+        
 
         use std::time::{Duration,Instant};
         let start_loading_time = Instant::now();
@@ -1154,7 +1159,9 @@ impl State {
             debug_mode_texture,
             frame_time_graph,
             frametime_vertex_buffer,
-            frame_time_render_pipeline
+            frame_time_render_pipeline,
+            supported_features: features,
+            supported_limits: limits,
         }
     }
 
@@ -1224,7 +1231,14 @@ impl State {
                                 match self.render_output_mode {
                                     RenderOutputMode::Unlit => {self.render_output_mode = RenderOutputMode::Lit; true}
                                     RenderOutputMode::Lit => {self.render_output_mode = RenderOutputMode::LitWithShadow; true}
-                                    RenderOutputMode::LitWithShadow => {self.render_output_mode = RenderOutputMode::Wireframe; true}
+                                    RenderOutputMode::LitWithShadow => {
+                                        if self.wireframe_pipeline.is_some(){
+                                            self.render_output_mode = RenderOutputMode::Wireframe;
+                                        } else {
+                                            self.render_output_mode = RenderOutputMode::DebugLitWithShadow;
+                                        }
+                                        true
+                                    }
                                     RenderOutputMode::Wireframe => {self.render_output_mode = RenderOutputMode::DebugLitWithShadow; true}
                                     RenderOutputMode::DebugLitWithShadow => {self.render_output_mode = RenderOutputMode::Unlit; true}
                                 } 
@@ -2005,7 +2019,9 @@ impl State {
                 }
                 RenderOutputMode::Wireframe => {
                     //println!("rendering Wireframe");
-                    render_pass.set_pipeline(&self.wireframe_pipeline);
+                    //assume wireframe output mode will only set on device that support polygon line mode, 
+                    //so the pipeline will always is some
+                    render_pass.set_pipeline(&self.wireframe_pipeline.as_ref().unwrap());
                     temp_counts += 1;
 
                     for model in &self.models {
